@@ -920,9 +920,6 @@ impl Source for Phone {
             && parts.peek().is_some()
             && parts.all(|name| name.to_str().is_some_and(|name| !name.starts_with('.')))
     }
-    fn is_phone(&self) -> bool {
-        true
-    }
     fn identity(&self) -> &str {
         &self.identity
     }

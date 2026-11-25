@@ -1446,8 +1446,7 @@
         "Większy"
       ],
       "show_tool_tip": "Pokazuj podpowiedzi przycisków",
-      "show_status_bar": "Pokazuj pasek stanu",
-      "auto_check_updates": "Automatycznie sprawdzaj aktualizacje"
+      "show_status_bar": "Pokazuj pasek stanu"
     },
     "raw": {
       "title": "RAW",
@@ -1851,26 +1850,7 @@
         "feedback": "Prześlij opinię",
         "privacy": "Prywatność"
       },
-      "section_updates": "Aktualizacje",
-      "auto_update": {
-        "update": "Aktualizuj",
-        "check": "Sprawdź aktualizacje",
-        "checking": "Sprawdzanie...",
-        "install": "Zainstaluj i uruchom ponownie",
-        "installing": "Instalowanie...",
-        "new_version_available": "Dostępna nowa wersja: {version}",
-        "latest_version": "Korzystasz z najnowszej wersji.",
-        "downloading_update": "Pobieranie aktualizacji...",
-        "downloading_started": "Rozpoczęto pobieranie...",
-        "downloading": "Pobieranie... {percent}%",
-        "download_finished": "Pobieranie zakończone. Instalowanie...",
-        "update_installed": "Aktualizacja zainstalowana. Ponowne uruchamianie...",
-        "update_installed_waiting_restart": "Aktualizacja zainstalowana. Uruchom aplikację ponownie.",
-        "release_note": "Informacje o wydaniu",
-        "restart": "Uruchom ponownie",
-        "failed_check": "Nie udało się sprawdzić aktualizacji",
-        "failed_install": "Nie udało się zainstalować aktualizacji"
-      }
+      "section_updates": "Aktualizacje"
     }
   }
 }

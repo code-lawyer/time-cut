@@ -174,6 +174,6 @@ pub(super) fn observe(db: &Connection, dest: &Target, report: &mut Report) -> Re
     }
     db.execute("UPDATE phone_verification SET baseline=?,verified_at=?,attempts=attempts+1,last_checked=?,last_phase=?
         WHERE library=? AND album=? AND device=?",
-        params![next_baseline, report.verified.then_some(now), now, report.phase, dest.library, dest.album, key])?;
+        params![next_baseline, report.verified.then_some(now), now, report.phase.as_str(), dest.library, dest.album, key])?;
     Ok(())
 }

@@ -239,10 +239,9 @@ fn catalog_change_stops_the_remaining_files_before_publication() {
     std::fs::write(source.join("01.jpg"), b"first completed photo").unwrap();
     std::fs::write(source.join("02.jpg"), b"second photo").unwrap();
     let mut checks = 0;
-    let result = transfer_guarded(
+    let result = copy_folder(
         &dest,
-        "folder",
-        || Ok(Box::new(Folder::new(&source, &dest)?)),
+        &source,
         |_| {},
         || {
             checks += 1;

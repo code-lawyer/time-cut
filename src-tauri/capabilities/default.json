@@ -60,12 +60,8 @@
     "os:allow-hostname",
     "dialog:default",
     "os:default",
-    "process:default",
-    "process:allow-restart",
-    "aptabase:allow-track-event",
     "shell:default",
     "fs:default",
-    "fs:scope",
-    "updater:default"
+    "fs:scope"
   ]
 }

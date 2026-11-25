@@ -1446,8 +1446,7 @@
         "더 크게"
       ],
       "show_tool_tip": "버튼 팁 표시",
-      "show_status_bar": "상태 표시줄",
-      "auto_check_updates": "업데이트 자동 확인"
+      "show_status_bar": "상태 표시줄"
     },
     "raw": {
       "title": "RAW",
@@ -1851,26 +1850,7 @@
         "feedback": "피드백",
         "privacy": "개인정보"
       },
-      "section_updates": "업데이트",
-      "auto_update": {
-        "update": "업데이트",
-        "check": "업데이트 확인",
-        "checking": "확인 중...",
-        "install": "설치 및 재시작",
-        "installing": "설치 중...",
-        "new_version_available": "새 버전을 사용할 수 있습니다: {version}",
-        "latest_version": "최신 버전입니다.",
-        "downloading_update": "업데이트 다운로드 중...",
-        "downloading_started": "다운로드 시작됨...",
-        "downloading": "다운로드 중... {percent}%",
-        "download_finished": "다운로드 완료. 설치 중...",
-        "update_installed": "업데이트 설치 완료. 재시작 중...",
-        "update_installed_waiting_restart": "업데이트가 설치되었습니다. 앱을 재시작해 주세요.",
-        "release_note": "릴리스 노트",
-        "restart": "재시작",
-        "failed_check": "업데이트 확인 실패",
-        "failed_install": "업데이트 설치 실패"
-      }
+      "section_updates": "업데이트"
     }
   }
 }

@@ -48,6 +48,7 @@
     "aboutDescription": "在电脑上导入、整理和浏览照片与视频。",
     "privacySummary": "默认在本机整理照片和人物。查看地图会请求地图图块。只有点击发送预览后，所选 AI 工具才会收到压缩图片。",
     "updateNotice": "请使用新版便携包更新 Time-cut 测试版。",
+    "releaseDownloads": "下载新版",
     "minimizeWindow": "最小化窗口",
     "maximizeWindow": "最大化窗口",
     "restoreWindow": "还原窗口",
@@ -1600,8 +1601,7 @@
         "更大"
       ],
       "show_tool_tip": "显示按钮提示",
-      "show_status_bar": "显示状态栏",
-      "auto_check_updates": "自动检查更新"
+      "show_status_bar": "显示状态栏"
     },
     "raw": {
       "title": "RAW",
@@ -2015,26 +2015,7 @@
         "feedback": "问题反馈",
         "privacy": "隐私"
       },
-      "section_updates": "更新",
-      "auto_update": {
-        "update": "更新",
-        "check": "检查更新",
-        "checking": "检查中...",
-        "install": "安装并重启",
-        "installing": "安装中...",
-        "new_version_available": "新版本可用: {version}",
-        "latest_version": "您已是最新版本",
-        "downloading_update": "正在下载更新...",
-        "downloading_started": "开始下载...",
-        "downloading": "下载中... {percent}%",
-        "download_finished": "下载完成。正在安装...",
-        "update_installed": "更新已安装。正在重启...",
-        "update_installed_waiting_restart": "更新已安装。请重启应用。",
-        "release_note": "更新说明",
-        "restart": "重启",
-        "failed_check": "检查更新失败",
-        "failed_install": "安装更新失败"
-      }
+      "section_updates": "更新"
     }
   }
 }

@@ -1446,8 +1446,7 @@
         "Plus grand"
       ],
       "show_tool_tip": "Conseils des boutons",
-      "show_status_bar": "Barre d'état",
-      "auto_check_updates": "Rechercher automatiquement les mises à jour"
+      "show_status_bar": "Barre d'état"
     },
     "raw": {
       "title": "RAW",
@@ -1851,26 +1850,7 @@
         "feedback": "Retour",
         "privacy": "Confidentialite"
       },
-      "section_updates": "Mises à jour",
-      "auto_update": {
-        "update": "Mettre à jour",
-        "check": "Vérifier les mises à jour",
-        "checking": "Vérification...",
-        "install": "Installer et redémarrer",
-        "installing": "Installation...",
-        "new_version_available": "Nouvelle version disponible : {version}",
-        "latest_version": "Vous avez la dernière version.",
-        "downloading_update": "Téléchargement de la mise à jour...",
-        "downloading_started": "Téléchargement commencé...",
-        "downloading": "Téléchargement... {percent}%",
-        "download_finished": "Téléchargement terminé. Installation...",
-        "update_installed": "Mise à jour installée. Redémarrage...",
-        "update_installed_waiting_restart": "Mise à jour installée. Veuillez redémarrer l'application.",
-        "release_note": "Notes de version",
-        "restart": "Redémarrer",
-        "failed_check": "Échec de la vérification des mises à jour",
-        "failed_install": "Échec de l'installation de la mise à jour"
-      }
+      "section_updates": "Mises à jour"
     }
   }
 }

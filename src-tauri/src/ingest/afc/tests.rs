@@ -238,9 +238,6 @@ impl Source for ShortConnection {
     fn identity(&self) -> &str {
         "afc:CAMERA"
     }
-    fn is_phone(&self) -> bool {
-        true
-    }
     fn saved_files(&self) -> Option<&dyn crate::ingest::archive::SavedFiles> {
         Some(self)
     }

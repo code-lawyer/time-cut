@@ -1,6 +1,6 @@
 {
   "productName": "Time-cut",
-  "version": "0.1.0-preview.39",
+  "version": "0.1.0-preview.40",
   "identifier": "app.timecut.album",
   "build": {
     "beforeBuildCommand": "pnpm --dir ../src-vite build",
@@ -54,7 +54,6 @@
     "active": true,
     "category": "Graphics and Design",
     "targets": "all",
-    "createUpdaterArtifacts": false,
     "icon": [
       "icons/icon.png",
       "icons/icon.ico",
@@ -70,12 +69,6 @@
       "resources/models/SFace-LICENSE.txt": "licenses/SFace-LICENSE.txt",
       "resources/ffmpeg/*": "ffmpeg",
       "../THIRD_PARTY_NOTICES.txt": "licenses/THIRD_PARTY_NOTICES.txt"
-    }
-  },
-  "plugins": {
-    "updater": {
-      "endpoints": [],
-      "pubkey": ""
     }
   }
 }

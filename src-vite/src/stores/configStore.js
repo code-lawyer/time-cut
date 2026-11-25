@@ -147,7 +147,6 @@ export const useConfigStore = defineStore('configStore', {
       showToolTip: true,          // show button tooltip
       statusBarFields: null,
       showStatusBar: true,        // show status bar
-      autoCheckUpdates: true,      // automatically check for updates
       fileDeleteBehavior: 'trash',
       debugMode: false,           // debug mode
 
@@ -321,9 +320,6 @@ export const useConfigStore = defineStore('configStore', {
     },
     setShowStatusBar(showStatusBar) {
       this.settings.showStatusBar = showStatusBar;
-    },
-    setAutoCheckUpdates(autoCheckUpdates) {
-      this.settings.autoCheckUpdates = autoCheckUpdates;
     },
     setDebugMode(debugMode) {
       this.settings.debugMode = debugMode;

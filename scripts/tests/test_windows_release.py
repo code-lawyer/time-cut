@@ -1,5 +1,6 @@
 """Exercise the Windows download and packaging scripts in an isolated checkout."""
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -7,11 +8,51 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
 from zipfile import ZipFile
+
+from scripts import fetch_timecut_ffmpeg as ffmpeg
 
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 PWSH = shutil.which("pwsh") or shutil.which("powershell")
+
+
+class FFmpegFallbackTests(unittest.TestCase):
+    def test_uses_public_preview_after_upstream_archive_expires(self):
+        version = "0.1.0-preview.71"
+        name = f"Time-cut-{version}-windows-x64.zip"
+        releases = [
+            {"tag_name": f"timecut-v{version}", "draft": False, "published_at": "2026-11-25T19:30:00Z",
+             "assets": [{"name": name, "state": "uploaded"}]},
+            {"tag_name": "timecut-v0.1.0-preview.72", "draft": True, "published_at": None, "assets": []},
+        ]
+        expected = f"https://github.com/{ffmpeg.REPOSITORY}/releases/download/timecut-v{version}/{name}"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / name
+            contents = {tool: tool.encode() for tool in ("ffmpeg", "ffprobe")}
+            release = {**ffmpeg.RELEASE, **{tool + "Sha256": hashlib.sha256(data).hexdigest()
+                                           for tool, data in contents.items()}}
+            with ZipFile(source, "w") as fixture:
+                for tool, data in contents.items():
+                    fixture.writestr(f"portable/ffmpeg/{tool}-{ffmpeg.TRIPLE}.exe", data)
+
+            def download(url, archive):
+                if url.startswith(release["distribution"]):
+                    raise HTTPError(url, 404, "gone", None, None)
+                self.assertEqual(url, expected)
+                shutil.copyfile(source, archive)
+
+            target = root / "sidecars"
+            with (patch.object(ffmpeg, "RELEASE", release),
+                  patch.object(ffmpeg.urllib.request, "urlretrieve", side_effect=download),
+                  patch.object(ffmpeg.urllib.request, "urlopen", return_value=io.BytesIO(json.dumps(releases).encode()))):
+                ffmpeg.prepare(target)
+                ffmpeg.prepare(target, verify_only=True)
+            for tool, data in contents.items():
+                self.assertEqual((target / f"{tool}-{ffmpeg.TRIPLE}.exe").read_bytes(), data)
 
 
 @unittest.skipUnless(os.name == "nt" and PWSH, "requires Windows PowerShell")
@@ -105,10 +146,18 @@ class WindowsReleaseTests(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         output = self.root / "release-test"
         label = "Time-cut-0.1.0-preview.1-windows-x64"
-        (output / label / "keep.txt").write_text("user file")
+        self.assertFalse((output / label).exists())
+        unpacked = output / label
+        unpacked.mkdir()
+        (unpacked / "keep.txt").write_text("user file")
         second = self.run_ps(package)
         self.assertEqual(second.returncode, 0, second.stderr)
-        self.assertFalse((output / label / "keep.txt").exists())
+        self.assertEqual((unpacked / "keep.txt").read_text(), "user file")
+        self.assertEqual(list(output.glob(f"{label}.previous-*")), [])
+        explicit = self.run_ps(package + " -KeepUnpacked")
+        self.assertEqual(explicit.returncode, 0, explicit.stderr)
+        self.assertFalse((unpacked / "keep.txt").exists())
+        self.assertTrue((unpacked / "Time-cut.exe").is_file())
         preserved = list(output.glob(f"{label}.previous-*/keep.txt"))
         self.assertEqual([p.read_text() for p in preserved], ["user file"])
         archive = output / (label + ".zip")
@@ -120,3 +169,7 @@ class WindowsReleaseTests(unittest.TestCase):
             self.assertEqual(len(info["commit"]), 40)
             self.assertEqual(info["executableSHA256"].lower(), hashlib.sha256(b"Lap.exe").hexdigest())
         self.assertEqual(Path(str(archive) + ".sha256").read_text().split()[0], hashlib.sha256(archive.read_bytes()).hexdigest())
+        folder_only = self.run_ps(package + " -SkipZip -OutputDirectory ./folder-only")
+        self.assertEqual(folder_only.returncode, 0, folder_only.stderr)
+        self.assertTrue((self.root / "folder-only" / label / "Time-cut.exe").is_file())
+        self.assertFalse((self.root / "folder-only" / f"{label}.zip").exists())

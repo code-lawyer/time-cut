@@ -263,7 +263,7 @@ pub(super) fn resume<Guard>(
     if report.scanned == 0 {
         return Ok(false);
     }
-    report.phase = "仍有素材待补".into();
+    report.phase = Phase::Pending;
     publish(report, true);
     Ok(true)
 }

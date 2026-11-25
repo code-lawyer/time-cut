@@ -1446,8 +1446,7 @@
         "Maior"
       ],
       "show_tool_tip": "Dicas dos botões",
-      "show_status_bar": "Barra de status",
-      "auto_check_updates": "Verificar atualizações automaticamente"
+      "show_status_bar": "Barra de status"
     },
     "raw": {
       "title": "RAW",
@@ -1851,26 +1850,7 @@
         "feedback": "Feedback",
         "privacy": "Privacidade"
       },
-      "section_updates": "Atualizações",
-      "auto_update": {
-        "update": "Atualizar",
-        "check": "Verificar atualizações",
-        "checking": "Verificando...",
-        "install": "Instalar e Reiniciar",
-        "installing": "Instalando...",
-        "new_version_available": "Nova versão disponível: {version}",
-        "latest_version": "Você está na versão mais recente.",
-        "downloading_update": "Baixando atualização...",
-        "downloading_started": "Download iniciado...",
-        "downloading": "Baixando... {percent}%",
-        "download_finished": "Download concluído. Instalando...",
-        "update_installed": "Atualização instalada. Reiniciando...",
-        "update_installed_waiting_restart": "Atualização instalada. Reinicie o aplicativo.",
-        "release_note": "Notas da versão",
-        "restart": "Reiniciar",
-        "failed_check": "Falha ao verificar atualizações",
-        "failed_install": "Falha ao instalar atualização"
-      }
+      "section_updates": "Atualizações"
     }
   }
 }

@@ -1446,8 +1446,7 @@
         "Groter"
       ],
       "show_tool_tip": "Knopuitleg tonen",
-      "show_status_bar": "Statusbalk tonen",
-      "auto_check_updates": "Automatisch controleren op updates"
+      "show_status_bar": "Statusbalk tonen"
     },
     "raw": {
       "title": "RAW",
@@ -1851,26 +1850,7 @@
         "feedback": "Feedback",
         "privacy": "Privacy"
       },
-      "section_updates": "Updates",
-      "auto_update": {
-        "update": "Bijwerken",
-        "check": "Controleren op updates",
-        "checking": "Controleren...",
-        "install": "Installeren en herstarten",
-        "installing": "Installeren...",
-        "new_version_available": "Nieuwe versie beschikbaar: {version}",
-        "latest_version": "Je gebruikt de nieuwste versie.",
-        "downloading_update": "Update downloaden...",
-        "downloading_started": "Downloaden gestart...",
-        "downloading": "Downloaden... {percent}%",
-        "download_finished": "Download voltooid. Installeren...",
-        "update_installed": "Update geïnstalleerd. Herstarten...",
-        "update_installed_waiting_restart": "Update geïnstalleerd. Start de app opnieuw.",
-        "release_note": "Release-opmerkingen",
-        "restart": "Herstarten",
-        "failed_check": "Kan niet controleren op updates",
-        "failed_install": "Kan update niet installeren"
-      }
+      "section_updates": "Updates"
     }
   }
 }

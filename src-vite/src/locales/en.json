@@ -48,6 +48,7 @@
     "aboutDescription": "Import, organize and browse photos and videos on your computer.",
     "privacySummary": "Photo and face indexing run locally. Viewing a map requests tiles from the selected provider. An external AI tool receives a compressed image only when you send a preview.",
     "updateNotice": "Time-cut previews are updated using a new portable package.",
+    "releaseDownloads": "Release downloads",
     "minimizeWindow": "Minimize window",
     "maximizeWindow": "Maximize window",
     "restoreWindow": "Restore window",
@@ -1600,8 +1601,7 @@
         "Larger"
       ],
       "show_tool_tip": "Show button tips",
-      "show_status_bar": "Show status bar",
-      "auto_check_updates": "Auto-check for updates"
+      "show_status_bar": "Show status bar"
     },
     "raw": {
       "title": "RAW",
@@ -2015,26 +2015,7 @@
         "feedback": "Feedback",
         "privacy": "Privacy"
       },
-      "section_updates": "Updates",
-      "auto_update": {
-        "update": "Update",
-        "check": "Check for updates",
-        "checking": "Checking...",
-        "install": "Install & restart",
-        "installing": "Installing...",
-        "new_version_available": "New version available: {version}",
-        "latest_version": "You are on the latest version.",
-        "downloading_update": "Downloading update...",
-        "downloading_started": "Started downloading...",
-        "downloading": "Downloading... {percent}%",
-        "download_finished": "Download finished. Installing...",
-        "update_installed": "Update installed. Restarting...",
-        "update_installed_waiting_restart": "Update installed. Please restart the app.",
-        "release_note": "Release note",
-        "restart": "Restart",
-        "failed_check": "Failed to check for updates",
-        "failed_install": "Failed to install update"
-      }
+      "section_updates": "Updates"
     }
   }
 }

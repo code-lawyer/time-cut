@@ -45,7 +45,7 @@
               class="inline-flex items-center gap-1.5 rounded-box px-2 py-1 text-xs hover:text-primary">
               <IconGithub class="t-icon-size-sm" /> Lap v0.4.1
             </a>
-            <a v-if="projectRepository" :href="projectRepository + '/issues'" target="_blank" rel="noopener noreferrer"
+            <a :href="projectRepository + '/issues'" target="_blank" rel="noopener noreferrer"
               class="inline-flex items-center gap-1.5 rounded-box px-2 py-1 text-xs hover:text-primary">
               <IconFocus class="t-icon-size-sm" /> {{ $t('settings.about.package.feedback') }}
             </a>
@@ -68,46 +68,23 @@
       <div class="flex items-center gap-2 text-base-content/30">
         <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.about.section_updates') }}</span>
       </div>
-      <p v-if="!updaterEnabled" class="px-1 text-sm">{{ $t('timecut.updateNotice') }}</p>
-      <div v-else class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-        <div class="min-w-0 flex-1 flex flex-col gap-0.5 text-sm leading-5">
-          <div>{{ updateStatusText }}</div>
-          <progress
-            v-if="isDownloadingUpdate"
-            class="progress progress-primary mt-1 h-1.5 w-full"
-            :value="downloadPercent === null ? undefined : downloadPercent"
-            max="100"
-          ></progress>
-        </div>
-        <button
-          class="btn btn-sm btn-ghost rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content shrink-0"
-          :disabled="isCheckingUpdate || isInstallingUpdate || isDownloadingUpdate"
-          @click="handleUpdateAction"
-        >
-          <span v-if="isCheckingUpdate || isInstallingUpdate || isDownloadingUpdate" class="loading loading-spinner loading-xs"></span>
-          <span v-else>{{ updateButtonText }}</span>
-        </button>
-      </div>
-      <div v-if="updaterEnabled" class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-        <div class="flex flex-col gap-0.5 text-sm leading-5">
-          <div>{{ $t('settings.general.auto_check_updates') }}</div>
-        </div>
-        <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.autoCheckUpdates" />
-      </div>
+      <p class="px-1 text-sm">{{ $t('timecut.updateNotice') }}</p>
+      <a :href="projectRepository + '/releases'" target="_blank" rel="noopener noreferrer"
+        class="inline-flex items-center gap-1.5 rounded-box px-2 py-1 text-sm hover:text-primary">
+        <IconGithub class="t-icon-size-sm" /> {{ $t('timecut.releaseDownloads') }}
+      </a>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue';
-import { useI18n } from 'vue-i18n';
 import { getPackageInfo, getBuildTime } from '@/common/api';
-import { useAppUpdater, updaterEnabled, projectRepository } from '@/common/updater';
-import { config } from '@/common/config';
 import { IconGithub, IconFocus } from '@/common/icons';
 import privacy from '../../../PRIVACY.md?raw';
 import iconLogo from '@/assets/images/icon.png';
 
+const projectRepository = (import.meta.env.VITE_TIMECUT_REPOSITORY_URL || 'https://github.com/code-lawyer/time-cut').replace(/\/+$/, '');
 const packageInfo = ref<any>({
   name: '',
   description: '',
@@ -125,35 +102,6 @@ const displayVersion = computed(() => {
   return commitHash ? `${version} (${commitHash})` : version;
 });
 const privacyParagraphs = privacy.trim().split(/\r?\n\s*\r?\n/);
-const { locale, messages } = useI18n();
-const localeMsg = computed(() => messages.value[locale.value] as any);
-const {
-  isCheckingUpdate,
-  isInstallingUpdate,
-  isDownloadingUpdate,
-  isUpdateReadyToRestart,
-  updateAvailable,
-  updateVersion,
-  downloadProgressLabel,
-  downloadPercent,
-  checkError,
-  updateButtonText,
-  handleUpdateAction,
-} = useAppUpdater(localeMsg, { toastPlacement: 'center', silent: true });
-
-// Status line for the Updates section: reflects the current update state.
-const updateStatusText = computed(() => {
-  const au = localeMsg.value.settings.about.auto_update;
-  if (isDownloadingUpdate.value) return downloadProgressLabel.value;
-  if (isInstallingUpdate.value) return au.installing;
-  if (isCheckingUpdate.value) return au.checking;
-  if (checkError.value) return checkError.value;
-  if (isUpdateReadyToRestart.value) return au.update_installed_waiting_restart;
-  if (updateAvailable.value && updateVersion.value) {
-    return au.new_version_available.replace('{version}', updateVersion.value);
-  }
-  return au.latest_version;
-});
 
 onMounted(async () => {
   try {

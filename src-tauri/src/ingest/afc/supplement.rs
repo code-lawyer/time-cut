@@ -2,6 +2,7 @@
 //! The two source inventories remain independently identifiable in the same archive.
 use super::{Audit, Phone, same_hardware, scan, schedule::Plan};
 use crate::ingest::{
+    Phase,
     archive::{Archive, Result, Source},
     inbox, verification,
 };
@@ -13,8 +14,8 @@ pub(in crate::ingest) fn stalled(report: &crate::ingest::Report) -> bool {
         && report.newly_verified == 0
         && report.device_key.is_some()
         && (report.export_shortfall.is_some() || matches!(
-            report.phase.as_str(),
-            "手机媒体暂不可读" | "手机会话中断" | "手机返回内容与清单不符" | "Apple 相机原件待补"
+            report.phase,
+            Phase::MediaUnavailable | Phase::SessionInterrupted | Phase::ContentMismatch | Phase::AppleNeedsSupplement
         ))
 }
 

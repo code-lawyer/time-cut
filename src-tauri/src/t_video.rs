@@ -153,6 +153,11 @@ fn ffprobe_sidecar_name() -> &'static str {
 }
 
 fn find_sidecar(name: &str) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = std::env::var_os("TIMECUT_TEST_FFMPEG_DIR") {
+        let path = PathBuf::from(dir).join(name);
+        return path.is_file().then_some(path);
+    }
     SIDE_CAR_DIR.get().and_then(|dir| {
         let path = dir.join(name);
         if path.exists() { Some(path) } else { None }

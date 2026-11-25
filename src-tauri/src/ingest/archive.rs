@@ -90,9 +90,6 @@ pub trait Source {
     }
     /// Hardware serial read from the paired Apple session that owns this DCIM source.
     fn paired_camera_serial(&self) -> Option<&str> { None }
-    fn is_phone(&self) -> bool {
-        false
-    }
     fn visit(&self, emit: &mut dyn FnMut(ScanEvent) -> Result<()>) -> Result<()>;
     fn visit_for_copy(
         &self,
@@ -806,8 +803,7 @@ impl Archive {
     }
 
     /// Returns true only when this transfer published a new original.
-    #[cfg(test)]
-    pub fn import(
+    pub(super) fn import(
         &mut self,
         source: &dyn Source,
         item: &Item,

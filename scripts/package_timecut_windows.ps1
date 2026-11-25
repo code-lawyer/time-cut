@@ -4,9 +4,11 @@ param(
     [string]$OnnxRuntime = $env:ORT_LIB_LOCATION,
     [string]$CrtDirectory,
     [string]$OutputDirectory,
-    [switch]$SkipZip
+    [switch]$SkipZip,
+    [switch]$KeepUnpacked
 )
 $ErrorActionPreference = 'Stop'
+$keepDirectory = $SkipZip -or $KeepUnpacked
 $project = Split-Path $PSScriptRoot -Parent
 if (!$Binary) { $Binary = Join-Path $project 'src-tauri\target\release\Lap.exe' }
 if (!$OnnxRuntime) { throw 'Set ORT_LIB_LOCATION to the Microsoft ONNX Runtime 1.22.0 win-x64 native directory.' }
@@ -109,19 +111,14 @@ try {
     if (!$SkipZip) {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $temporary = Join-Path $work "$label.zip"
-        [IO.Compression.ZipFile]::CreateFromDirectory($dest, $temporary, [IO.Compression.CompressionLevel]::Fastest, $true)
+        [IO.Compression.ZipFile]::CreateFromDirectory($dest, $temporary, [IO.Compression.CompressionLevel]::Optimal, $true)
         $hash = (Get-FileHash -LiteralPath $temporary).Hash.ToLowerInvariant()
         [IO.File]::WriteAllText("$temporary.sha256", "$hash  $label.zip`n")
     }
     # Only the freshly assembled tree is shipped. Preserve anything a user may
     # have placed alongside an earlier unpacked binary when rebuilding a version.
     $previous = $null
-    $unchanged = Test-IdenticalDirectory $dest $published
-    if (!$unchanged -and [IO.Directory]::Exists($published)) {
-        $previous = Join-Path $release ("$label.previous-" + [guid]::NewGuid().ToString('N'))
-        [IO.Directory]::Move($published, $previous)
-        Write-Host "Previous unpacked directory preserved at $previous"
-    }
+    $publishDirectory = $keepDirectory -and !(Test-IdenticalDirectory $dest $published)
     $updated = @()
     try {
         if (!$SkipZip) {
@@ -134,7 +131,15 @@ try {
                 $updated += $suffix
             }
         }
-        if (!$unchanged) { [IO.Directory]::Move($dest, $published) }
+        if ($publishDirectory) {
+            if ([IO.Directory]::Exists($published)) {
+                $backupDirectory = Join-Path $release ("$label.previous-" + [guid]::NewGuid().ToString('N'))
+                [IO.Directory]::Move($published, $backupDirectory)
+                $previous = $backupDirectory
+                Write-Host "Previous unpacked directory preserved at $previous"
+            }
+            [IO.Directory]::Move($dest, $published)
+        }
     } catch {
         foreach ($suffix in $updated) {
             $backup = Join-Path $work ("previous.zip$suffix")
@@ -148,8 +153,11 @@ try {
 } finally {
     if ($lock) { $lock.Dispose() }
     $checkedWork = [IO.Path]::GetFullPath($work)
+    $workItem = Get-Item -LiteralPath $checkedWork -Force -ErrorAction SilentlyContinue
     if ([IO.Path]::GetDirectoryName($checkedWork) -eq $release -and
-        [IO.Path]::GetFileName($checkedWork) -match '^\.package-[0-9a-f]{32}$') {
+        [IO.Path]::GetFileName($checkedWork) -match '^\.package-[0-9a-f]{32}$' -and
+        $workItem -and !($workItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+        !(Get-ChildItem -LiteralPath $work -Force -Recurse | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } | Select-Object -First 1)) {
         Remove-Item -LiteralPath $checkedWork -Recurse -Force
     }
 }

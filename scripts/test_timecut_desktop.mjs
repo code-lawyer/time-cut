@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { verifyLocalGallery } from './verify_timecut_archive.mjs';
+import { saveQaResult } from './timecut_qa_result.mjs';
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const executable = path.resolve(process.argv[2]);
@@ -116,6 +117,9 @@ const env = {
 const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') || 'Path';
 env[pathKey] = [path.join(env.SystemRoot, 'System32'), env.SystemRoot].join(path.delimiter);
 const app = spawn(executable, [], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+const appClosed = new Promise(resolve => app.once('close', resolve));
+let launchError;
+app.once('error', error => { launchError = error; });
 const stdout = fs.createWriteStream(path.join(qa, 'app.log'));
 app.stdout.pipe(stdout, { end: false });
 app.stderr.pipe(stdout, { end: false });
@@ -144,7 +148,10 @@ async function waitFor(test, label, ms = 90000) {
   const end = Date.now() + ms;
   let last = '';
   while (Date.now() < end) {
-    if (app.exitCode !== null) throw Error('Process exited ' + app.exitCode + ' while ' + label);
+    if (launchError) throw launchError;
+    if (app.exitCode !== null || app.signalCode !== null) {
+      throw Error('Process exited ' + (app.exitCode ?? app.signalCode) + ' while ' + label);
+    }
     try {
       const value = await test();
       if (value) return value;
@@ -704,9 +711,9 @@ try {
 } finally {
   socket?.close();
   if (app.exitCode === null) app.kill();
-  stdout.end();
-  fs.writeFileSync(path.join(qa, 'result.json'), JSON.stringify(tempResult, null, 2));
-  console.log(path.join(qa, 'result.json'));
+  await appClosed;
+  await new Promise(resolve => stdout.end(resolve));
+  saveQaResult(project, qa, tempResult, failure);
   if (failure) {
     console.error(failure);
     process.exitCode = 1;

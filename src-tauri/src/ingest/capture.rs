@@ -1,5 +1,5 @@
 use super::{
-    Report,
+    Phase, Report,
     archive::{Archive, CopyOrder, Item, Result, ScanEvent, Source},
     inbox, inventory, issue,
     resume::PhoneQueue,
@@ -112,7 +112,7 @@ fn receive_one(
                 inbox::ReadPhase::Compare => "核对手机旧版本",
                 inbox::ReadPhase::Confirm => "确认手机返回的原件",
             };
-            if report.phase != phase {
+            if report.phase.as_str() != phase {
                 report.phase = phase.into();
             }
             report.transferred_bytes = count;
@@ -211,7 +211,10 @@ pub(super) fn receive<Guard>(
             let camera_open: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM phone_camera_roots c
                 JOIN phone_runs r ON r.source=c.source WHERE r.safe_at IS NULL AND (c.serial=?1 OR c.udid=?1))",
                 [id],|r|r.get(0))?;
-            if camera_open { report.phase = "等待 Apple 原件目录".into(); return Ok(()); }
+            if camera_open {
+                report.phase = Phase::AwaitAppleDirectory;
+                return Ok(());
+            }
         }
         inbox::recover_files(&archive)?;
         let previously_complete: bool = db.query_row(
@@ -633,15 +636,14 @@ pub(super) fn receive<Guard>(
             || report.discovered != report.added + report.skipped
         {
             report.phase = if report.failed > 0 {
-                "部分未完成"
+                "部分未完成".into()
             } else if report.discovered == 0 {
-                "手机媒体暂不可读"
+                Phase::MediaUnavailable
             } else if report.pending > 0 {
-                "仍有素材待补"
+                Phase::Pending
             } else {
-                "等待完整媒体清单"
-            }
-            .into();
+                "等待完整媒体清单".into()
+            };
             return Ok(());
         }
         report.phase = "复核手机素材清单".into();
@@ -668,7 +670,7 @@ pub(super) fn receive<Guard>(
         }
         let digest = queue.inventory_digest();
         if !inbox::verify_supplements(&archive, run)? {
-            report.phase = "Apple 相机原件待补".into();
+            report.phase = Phase::AppleNeedsSupplement;
             return Ok(());
         }
         let tx = db.unchecked_transaction()?;
@@ -717,12 +719,12 @@ pub(super) fn receive<Guard>(
     if let Err(e) = result {
         #[cfg(windows)]
         if let Some(stop) = e.downcast_ref::<super::TransferStop>() {
-            report.phase = stop.phase().into();
+            report.phase = stop.phase();
             return report;
         }
         #[cfg(windows)]
         if let Some(stop) = super::wpd::interruption(e.as_ref()) {
-            report.phase = stop.phase().into();
+            report.phase = stop.phase();
             issue(&mut report, e.to_string());
             return report;
         }

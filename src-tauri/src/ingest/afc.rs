@@ -328,9 +328,6 @@ impl Source for Phone {
     }
     fn paired_camera_serial(&self) -> Option<&str> { Some(&self.serial) }
     fn saved_files(&self) -> Option<&dyn SavedFiles> { Some(self) }
-    fn is_phone(&self) -> bool {
-        true
-    }
     fn visit(&self, emit: &mut dyn FnMut(ScanEvent) -> Result<()>) -> Result<()> {
         self.walk(None, emit)
     }

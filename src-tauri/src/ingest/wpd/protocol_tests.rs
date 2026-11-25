@@ -5,9 +5,8 @@ mod fixture_acceptance;
 
 use super::*;
 use crate::ingest::{
-    archive::Folder,
+    legacy_fixture::transfer,
     tests::{Sandbox, originals},
-    transfer,
 };
 use std::{
     cell::Cell,
@@ -345,7 +344,7 @@ fn direct_receipt_comparisons_use_positive_controls_and_double_read_new_contents
     let interrupted = receive(3, true);
     assert_eq!(interrupted.newly_verified, 8);
     assert!(interrupted.safe_at.is_none() && interrupted.failed > 0);
-    assert_eq!(interrupted.phase, "手机返回内容与清单不符");
+    assert_eq!(interrupted.phase.as_str(), "手机返回内容与清单不符");
     assert_eq!(opened.lock().unwrap().iter().filter(|p| p.ends_with("/fresh-rename.jpg")).count(), 2);
     assert!(
         interrupted
@@ -1146,7 +1145,7 @@ fn capture_delays_a_failed_video_and_finishes_from_verified_receipts() {
 }
 
 fn run(dest: &Path, endpoint: Phone) -> crate::ingest::Report {
-    transfer(dest, "WPD", || Ok(Box::new(endpoint)), |_| {})
+    transfer(dest, "WPD", || Ok(Box::new(endpoint)))
 }
 
 #[test]
@@ -1241,12 +1240,7 @@ fn android_wpd_reads_paginated_dcim_downloads_and_pictures_and_deduplicates_loca
     let (local, dest) = (temp.dir("local"), temp.dir("archive"));
     let camera_copy = b"camera photo from the second enumeration page";
     fs::write(local.join("renamed.jpg"), camera_copy).unwrap();
-    let preload = transfer(
-        &dest,
-        "local",
-        || Ok(Box::new(Folder::new(&local, &dest)?)),
-        |_| {},
-    );
+    let preload = crate::ingest::tests::local(&local, &dest);
     assert_eq!((preload.added, preload.failed), (1, 0));
 
     let mut rows = vec![

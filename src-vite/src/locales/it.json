@@ -1446,8 +1446,7 @@
         "Più grande"
       ],
       "show_tool_tip": "Mostra suggerimenti dei pulsanti",
-      "show_status_bar": "Mostra barra di stato",
-      "auto_check_updates": "Controlla automaticamente gli aggiornamenti"
+      "show_status_bar": "Mostra barra di stato"
     },
     "raw": {
       "title": "RAW",
@@ -1851,26 +1850,7 @@
         "feedback": "Feedback",
         "privacy": "Privacy"
       },
-      "section_updates": "Aggiornamenti",
-      "auto_update": {
-        "update": "Aggiorna",
-        "check": "Controlla aggiornamenti",
-        "checking": "Controllo...",
-        "install": "Installa e riavvia",
-        "installing": "Installazione...",
-        "new_version_available": "Nuova versione disponibile: {version}",
-        "latest_version": "Hai già l'ultima versione.",
-        "downloading_update": "Download dell'aggiornamento...",
-        "downloading_started": "Download avviato...",
-        "downloading": "Download... {percent}%",
-        "download_finished": "Download completato. Installazione...",
-        "update_installed": "Aggiornamento installato. Riavvio...",
-        "update_installed_waiting_restart": "Aggiornamento installato. Riavvia l'app.",
-        "release_note": "Note di rilascio",
-        "restart": "Riavvia",
-        "failed_check": "Impossibile controllare gli aggiornamenti",
-        "failed_install": "Impossibile installare l'aggiornamento"
-      }
+      "section_updates": "Aggiornamenti"
     }
   }
 }

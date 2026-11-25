@@ -85,18 +85,6 @@
                 </button>
               </template>
             </ContextMenu>
-            <div class="flex-1"></div>
-            <button
-              v-if="updateAvailable || isInstallingUpdate || isUpdateReadyToRestart || isReleaseNoteVisible"
-              class="badge badge-sm border-0 px-2 py-2 font-medium transition-colors shrink-0"
-              :class="isUpdateActionEnabled ? 'badge-primary cursor-pointer' : 'badge-neutral/60 cursor-default'"
-              :disabled="isInstallingUpdate"
-              :title="updateButtonTooltip"
-              @click="handleUpdateAction"
-            >
-              <span v-if="isInstallingUpdate" class="loading loading-spinner loading-xs"></span>
-              <span>{{ updateButtonText }}</span>
-            </button>
           </div>
 
           <!-- panel-->
@@ -191,7 +179,6 @@ import { getName } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
 import { applyAlbumAccess, recheckOfflineAlbums } from '@/common/albumRecovery';
 import { config, libConfig } from '@/common/config';
-import { useAppUpdater } from '@/common/updater';
 import { useUIStore } from '@/stores/uiStore';
 import { isWin, isMac, isLinux, SCALE_VALUES } from '@/common/utils';
 import { matchesShortcut, ShortcutPlatform } from '@/common/shortcuts';
@@ -367,18 +354,6 @@ let unlistenEditAlbumRequested: (() => void) | null = null;
 // Native Edit menu "Select All" routes to the photo selection via the backend event.
 let unlistenMenuSelectAll: (() => void) | null = null;
 const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
-const {
-  updateAvailable,
-  isCheckingUpdate,
-  isInstallingUpdate,
-  isUpdateReadyToRestart,
-  isReleaseNoteVisible,
-  updateButtonTooltip,
-  updateButtonText,
-  isUpdateActionEnabled,
-  checkForUpdates,
-  handleUpdateAction,
-} = useAppUpdater(localeMsg);
 
 // buttons
 const buttons = computed(() =>  [
@@ -485,7 +460,6 @@ async function finishStartup() {
   uiStore.startupReady = true;
   performance.mark('startup-first-content-ready');
   void invoke('finish_startup', { model: config.settings.imageSearch.model || 0 }).catch(console.error);
-  if (config.settings.autoCheckUpdates !== false) void checkForUpdates(false);
 }
 watch(databaseCorrupted, corrupted => {
   if (corrupted) void nextTick(() => requestAnimationFrame(() => requestAnimationFrame(() => finishStartup())));

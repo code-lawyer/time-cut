@@ -382,9 +382,6 @@ impl Source for Scoped {
     fn identity(&self) -> &str {
         &self.id
     }
-    fn is_phone(&self) -> bool {
-        true
-    }
     fn visit(&self, emit: &mut dyn FnMut(ScanEvent) -> Result<()>) -> Result<()> {
         self.scan(emit)
     }

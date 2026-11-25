@@ -1445,8 +1445,7 @@
         "Největší"
       ],
       "show_tool_tip": "Zobrazovat tipy u tlačítek",
-      "show_status_bar": "Zobrazovat stavový řádek",
-      "auto_check_updates": "Automaticky kontrolovat aktualizace"
+      "show_status_bar": "Zobrazovat stavový řádek"
     },
     "raw": {
       "title": "RAW",
@@ -1850,26 +1849,7 @@
         "feedback": "Zpětná vazba",
         "privacy": "Soukromí"
       },
-      "section_updates": "Aktualizace",
-      "auto_update": {
-        "update": "Aktualizovat",
-        "check": "Zkontrolovat aktualizace",
-        "checking": "Probíhá kontrola…",
-        "install": "Nainstalovat a restartovat",
-        "installing": "Instaluje se…",
-        "new_version_available": "Je dostupná nová verze: {version}",
-        "latest_version": "Používáte nejnovější verzi.",
-        "downloading_update": "Stahuje se aktualizace…",
-        "downloading_started": "Stahování zahájeno…",
-        "downloading": "Stahování… {percent} %",
-        "download_finished": "Stahování dokončeno. Probíhá instalace…",
-        "update_installed": "Aktualizace nainstalována. Probíhá restart…",
-        "update_installed_waiting_restart": "Aktualizace byla nainstalována. Restartujte aplikaci.",
-        "release_note": "Poznámky k vydání",
-        "restart": "Restartovat",
-        "failed_check": "Nepodařilo se zkontrolovat aktualizace",
-        "failed_install": "Nepodařilo se nainstalovat aktualizaci"
-      }
+      "section_updates": "Aktualizace"
     }
   }
 }

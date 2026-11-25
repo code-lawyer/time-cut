@@ -48,6 +48,7 @@
     "aboutDescription": "在電腦上匯入、整理和瀏覽照片與影片。",
     "privacySummary": "預設在本機整理照片與人物。檢視地圖時會要求地圖圖磚。只有點選傳送預覽後，所選 AI 工具才會收到壓縮圖片。",
     "updateNotice": "請使用新版可攜式套件更新 Time-cut 測試版。",
+    "releaseDownloads": "下載新版",
     "minimizeWindow": "最小化視窗",
     "maximizeWindow": "最大化視窗",
     "restoreWindow": "還原視窗",
@@ -1600,8 +1601,7 @@
         "更大"
       ],
       "show_tool_tip": "顯示按鈕提示",
-      "show_status_bar": "顯示狀態列",
-      "auto_check_updates": "自動檢查更新"
+      "show_status_bar": "顯示狀態列"
     },
     "raw": {
       "title": "RAW",
@@ -2015,26 +2015,7 @@
         "feedback": "意見回饋",
         "privacy": "隱私"
       },
-      "section_updates": "更新",
-      "auto_update": {
-        "update": "更新",
-        "check": "檢查更新",
-        "checking": "檢查中...",
-        "install": "安裝並重新啟動",
-        "installing": "安裝中...",
-        "new_version_available": "有新版本：{version}",
-        "latest_version": "你已使用最新版本。",
-        "downloading_update": "正在下載更新...",
-        "downloading_started": "已開始下載...",
-        "downloading": "下載中... {percent}%",
-        "download_finished": "下載完成。正在安裝...",
-        "update_installed": "更新已安裝。正在重新啟動...",
-        "update_installed_waiting_restart": "更新已安裝。請重新啟動應用程式。",
-        "release_note": "版本說明",
-        "restart": "重新啟動",
-        "failed_check": "無法檢查更新",
-        "failed_install": "無法安裝更新"
-      }
+      "section_updates": "更新"
     }
   }
 }

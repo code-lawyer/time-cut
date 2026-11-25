@@ -1,6 +1,4 @@
-#[cfg(windows)]
-use super::transfer_guarded;
-use super::{archive::*, transfer};
+use super::{archive::*, copy_folder, legacy_fixture::transfer};
 use std::{
     cell::RefCell,
     fs,
@@ -61,13 +59,8 @@ pub(super) fn originals(root: &Path) -> Vec<PathBuf> {
         .map(|e| e.into_path())
         .collect()
 }
-fn local(source: &Path, dest: &Path) -> super::Report {
-    transfer(
-        dest,
-        "fixture",
-        || Ok(Box::new(Folder::new(source, dest)?)),
-        |_| {},
-    )
+pub(super) fn local(source: &Path, dest: &Path) -> super::Report {
+    copy_folder(dest, source, |_| {}, || Ok(()), || Ok(()))
 }
 
 #[test]
@@ -244,9 +237,6 @@ struct DeviceFixture {
     reads: RefCell<Vec<String>>,
 }
 impl Source for DeviceFixture {
-    fn is_phone(&self) -> bool {
-        true
-    }
 
     fn identity(&self) -> &str {
         "fixture:serial-42"
@@ -506,7 +496,7 @@ fn a_short_jpeg_response_cannot_be_certified_by_a_different_native_representatio
         let mut camera = fixture(session, &[("Camera/IMG_1.JPG", returned)], None);
         camera.files[0].0.size = Some(2 * own_native.len() as u64);
         let result = capture_fixture(&root, camera, 1);
-        assert_eq!(result.phase, "手机返回内容与清单不符", "{:?}", result.issues);
+        assert_eq!(result.phase.as_str(), "手机返回内容与清单不符", "{:?}", result.issues);
         assert_eq!((result.added, result.failed), (0, 1));
         assert!(result.safe_at.is_none());
     }
@@ -612,7 +602,6 @@ struct ChecksumPhone {
 impl Source for ChecksumPhone {
     fn identity(&self)->&str { "afc:camera-42" }
     fn paired_camera_serial(&self)->Option<&str> { Some("HARDWARE-42") }
-    fn is_phone(&self)->bool { true }
     fn visit(&self,emit:&mut dyn FnMut(ScanEvent)->Result<()>)->Result<()> {self.phone.visit(emit)}
     fn reader(&self,item:&Item)->Result<Box<dyn Read>> {
         if let Some(stale)=&self.stale_payload {
@@ -652,7 +641,6 @@ struct WindowsCamera(DeviceFixture);
 #[cfg(windows)]
 impl Source for WindowsCamera {
     fn identity(&self) -> &str { "wpd:HARDWARE-42" }
-    fn is_phone(&self) -> bool { true }
     fn visit(&self, emit: &mut dyn FnMut(ScanEvent) -> Result<()>) -> Result<()> { self.0.visit(emit) }
     fn reader(&self, item: &Item) -> Result<Box<dyn Read>> { self.0.reader(item) }
 }
@@ -670,7 +658,7 @@ fn camera_only_capture_can_resume_file_and_repeat_when_the_windows_interface_arr
     assert!(partial.safe_at.is_none());
     let windows=capture(Box::new(WindowsCamera(fixture(2,catalogue,None))));
     assert!(windows.safe_at.is_none());
-    assert_eq!(windows.phase,"等待 Apple 原件目录");
+    assert_eq!(windows.phase.as_str(),"等待 Apple 原件目录");
     let complete=capture(phone(3,2));
     assert!(complete.safe_at.is_some(),"{:?}",complete.issues);
     assert_eq!((complete.added,complete.skipped,complete.failed),(1,1,0));
@@ -727,7 +715,7 @@ fn paired_camera_can_supplement_an_incomplete_windows_run_without_releasing_it_e
     assert!(attempt(&phone(true),"hardware-42",&key).is_err());
     let exported=windows(&[old,next]);
     assert!(exported.safe_at.is_none());
-    assert_eq!(exported.phase,"Apple 相机原件待补");
+    assert_eq!(exported.phase.as_str(),"Apple 相机原件待补");
     let stats=serde_json::to_value(attempt(&camera,"hardware-42",&key).unwrap().unwrap()).unwrap();
     assert_eq!(stats["listed"],2);
     assert_eq!(stats["copied"],1);
@@ -756,7 +744,7 @@ fn paired_camera_can_supplement_an_incomplete_windows_run_without_releasing_it_e
     }
     let damaged=windows(&[old,next]);
     assert!(damaged.safe_at.is_none());
-    assert_eq!(damaged.phase,"Apple 相机原件待补");
+    assert_eq!(damaged.phase.as_str(),"Apple 相机原件待补");
     assert!(attempt(&camera,"hardware-42",&key).unwrap().is_some());
     let complete=windows(&[old,next]);
     assert!(complete.safe_at.is_some(),"{:?}",complete.issues);
@@ -1188,7 +1176,6 @@ fn old_gallery_remapped_versions_compare_without_copy_and_changed_equal_size_is_
         &dest,
         "old",
         || Ok(Box::new(fixture(1, &entries, None))),
-        |_| {},
     );
     assert_eq!(legacy.added, 2);
     let unchanged = capture_fixture(&dest, fixture(2, &entries, None), 2);
@@ -1220,7 +1207,7 @@ fn partial_inventory_and_missing_receipt_never_release_the_cable_early() {
     let entries: [(&str, &[u8]); 2] = [("A.JPG", b"one"), ("B.MOV", b"unfinished")];
     let first = capture_fixture(&dest, fixture(1, &entries[..1], None), 2);
     assert!(first.safe_at.is_none());
-    assert_eq!(first.phase, "等待完整媒体清单");
+    assert_eq!(first.phase.as_str(), "等待完整媒体清单");
     let spool = std::fs::read_dir(dest.join(".time-cut/inbox"))
         .unwrap()
         .next()
@@ -1284,14 +1271,14 @@ fn repeated_empty_sessions_retain_progress_and_the_full_inventory_floor() {
     assert_eq!(super::verification::capture_minimum(&db, &dest, "phone", None).unwrap(), 9);
     report.discovered = 0;
     report.added = 0;
-    report.phase = "手机媒体暂不可读".into();
+    report.phase = super::Phase::MediaUnavailable;
     for attempt in 2..=52 {
         report.receive_attempt = attempt;
         super::record_history(&db, &report).unwrap();
     }
     let (count, latest): (u32,u32) = db.query_row("SELECT COUNT(*),MAX(json_extract(data,'$.receive_attempt')) FROM history", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
     assert_eq!((count, latest), (2, 52));
-    report.phase = "手机会话中断".into();
+    report.phase = super::Phase::SessionInterrupted;
     super::record_history(&db, &report).unwrap();
     assert_eq!(db.query_row("SELECT COUNT(*) FROM history", [], |r| r.get::<_,u32>(0)).unwrap(),3);
     db.execute("DELETE FROM history", []).unwrap();
@@ -1378,7 +1365,7 @@ fn mismatched_phone_payload_closes_the_session_before_the_next_same_length_file(
     let mut shifted = fixture(1, &entries, None);
     shifted.files[1].1 = b"xx".to_vec();
     shifted.files[2].1 = entries[1].1.to_vec();
-    let corrupt = transfer(&dest, "WPD", || Ok(Box::new(shifted)), |_| {});
+    let corrupt = transfer(&dest, "WPD", || Ok(Box::new(shifted)));
     assert_eq!(
         (
             corrupt.phase.as_str(),
@@ -1394,7 +1381,6 @@ fn mismatched_phone_payload_closes_the_session_before_the_next_same_length_file(
         &dest,
         "WPD",
         || Ok(Box::new(fixture(2, &entries, None))),
-        |_| {},
     );
     assert_eq!(
         (
@@ -1426,9 +1412,9 @@ fn hung_wpd_session_stops_requests_and_keeps_completed_originals() {
     ];
     let mut interrupted = fixture(1, &entries, None);
     interrupted.session_error = Some(1);
-    let report = transfer(&dest, "WPD", || Ok(Box::new(interrupted)), |_| {});
+    let report = transfer(&dest, "WPD", || Ok(Box::new(interrupted)));
     assert_eq!(
-        (&*report.phase, report.added, report.scanned),
+        (report.phase.as_str(), report.added, report.scanned),
         ("手机会话中断", 1, 2)
     );
     assert_eq!(originals(&dest).len(), 1);
@@ -1443,7 +1429,6 @@ fn hung_wpd_session_stops_requests_and_keeps_completed_originals() {
         &dest,
         "WPD",
         || Ok(Box::new(fixture(2, &entries, None))),
-        |_| {},
     );
     assert_eq!((report.added, report.skipped, report.failed), (2, 1, 0));
     for (_, bytes) in entries {
@@ -1466,7 +1451,7 @@ fn unattended_retry_after_restart_imports_new_files_before_revalidating_old_vers
             item.version = Some(format!("session-{session}-{}", item.id));
         }
         phone.session_error = failed;
-        transfer(&dest, "WPD", || Ok(Box::new(phone)), |_| {})
+        transfer(&dest, "WPD", || Ok(Box::new(phone)))
     };
     let archived = [("DCIM/old.HEIC", b"old image".as_slice())];
     assert_eq!(run(1, &archived, None).added, 1);
@@ -1476,7 +1461,7 @@ fn unattended_retry_after_restart_imports_new_files_before_revalidating_old_vers
     let new_only = [("DCIM/new.jpg", b"new image".as_slice())];
     let partial = run(3, &new_only, None);
     assert_ne!(
-        partial.phase, "已完成",
+        partial.phase.as_str(), "已完成",
         "the outstanding phone entry was absent"
     );
     let edited = [("DCIM/old.HEIC", b"new bytes".as_slice()), entries[1]];
@@ -1485,7 +1470,7 @@ fn unattended_retry_after_restart_imports_new_files_before_revalidating_old_vers
         (recovered.added, recovered.skipped, recovered.failed),
         (1, 1, 0)
     );
-    assert_eq!(recovered.phase, "已完成");
+    assert_eq!(recovered.phase.as_str(), "已完成");
     let repeated = run(5, &edited, None);
     assert_eq!(
         (repeated.added, repeated.skipped, repeated.failed),
@@ -1507,7 +1492,7 @@ fn unattended_retry_remembers_a_failed_new_file_across_fresh_importers() {
     let run = |session, failure| {
         let mut phone = fixture(session, &entries, None);
         phone.session_error = failure;
-        transfer(&dest, "WPD", || Ok(Box::new(phone)), |_| {})
+        transfer(&dest, "WPD", || Ok(Box::new(phone)))
     };
     assert_eq!(run(1, Some(0)).added, 0);
     let second = run(2, Some(0));
@@ -1535,9 +1520,6 @@ fn unattended_process_exit_inside_a_phone_read_keeps_the_durable_queue() {
             fn identity(&self) -> &str {
                 self.0.identity()
             }
-            fn is_phone(&self) -> bool {
-                true
-            }
             fn visit(&self, emit: &mut dyn FnMut(ScanEvent) -> Result<()>) -> Result<()> {
                 self.0.visit(emit)
             }
@@ -1549,7 +1531,6 @@ fn unattended_process_exit_inside_a_phone_read_keeps_the_durable_queue() {
             Path::new(&dest),
             "WPD",
             || Ok(Box::new(Crash(fixture(1, &entries, None)))),
-            |_| {},
         );
         panic!("the test process did not reach the phone read");
     }
@@ -1566,13 +1547,12 @@ fn unattended_process_exit_inside_a_phone_read_keeps_the_durable_queue() {
     assert_eq!(status.code(), Some(73));
     let mut still_blocked = fixture(2, &entries, None);
     still_blocked.session_error = Some(0);
-    let retry = transfer(&dest, "WPD", || Ok(Box::new(still_blocked)), |_| {});
+    let retry = transfer(&dest, "WPD", || Ok(Box::new(still_blocked)));
     assert_eq!((retry.added, retry.pending, retry.failed), (1, 1, 1));
     let recovered = transfer(
         &dest,
         "WPD",
         || Ok(Box::new(fixture(3, &entries, None))),
-        |_| {},
     );
     assert_eq!(
         (recovered.added, recovered.skipped, recovered.pending),
@@ -1606,15 +1586,15 @@ fn unattended_verification_waits_for_two_identical_complete_inventories() {
         for (item, _) in &mut phone.files {
             item.version = Some(item.id.clone());
         }
-        let mut report = transfer(&dest, "WPD", || Ok(Box::new(phone)), |_| {});
+        let mut report = transfer(&dest, "WPD", || Ok(Box::new(phone)));
         let db = Connection::open(&db_path).unwrap();
         verification::observe(&db, &target, &mut report).unwrap();
         report
     };
     let a = ("a.jpg", b"one".as_slice());
     let b = ("b.jpg", b"two".as_slice());
-    assert_eq!(run(1, &[a]).phase, "等待完整媒体清单");
-    assert_eq!(run(2, &[a, b]).phase, "等待全量复扫");
+    assert_eq!(run(1, &[a]).phase.as_str(), "等待完整媒体清单");
+    assert_eq!(run(2, &[a, b]).phase.as_str(), "等待全量复扫");
     let alias = ("renamed.jpg", a.1);
     let changed = run(3, &[alias, b]);
     assert_eq!(
@@ -1655,7 +1635,7 @@ fn unattended_retry_keeps_both_same_name_same_size_edit_files_accounted_for() {
     let run = |session, count, failed| {
         let mut phone = fixture(session, &entries[..count], None);
         phone.session_error = failed;
-        transfer(&dest, "WPD", || Ok(Box::new(phone)), |_| {})
+        transfer(&dest, "WPD", || Ok(Box::new(phone)))
     };
     let interrupted = run(1, 3, Some(2));
     assert_eq!((interrupted.added, interrupted.pending), (2, 1));
@@ -1680,7 +1660,7 @@ fn unattended_retry_keeps_both_same_name_same_size_edit_files_accounted_for() {
 #[test]
 fn unattended_retry_waits_longer_on_repeated_empty_sessions() {
     let mut report = super::Report {
-        phase: "手机媒体暂不可读".into(),
+        phase: super::Phase::MediaUnavailable,
         ..Default::default()
     };
     let mut previous = None;
@@ -1694,8 +1674,32 @@ fn unattended_retry_waits_longer_on_repeated_empty_sessions() {
         super::next_phone_retry(&report, previous),
         Some(Duration::from_secs(20))
     );
-    report.phase = "已完成".into();
+    report.phase = super::Phase::Completed;
     assert_eq!(super::next_phone_retry(&report, previous), None);
+    report.phase = super::Phase::Pending;
+    report.newly_verified = 1;
+    assert_eq!(
+        super::next_phone_retry(&report, previous),
+        Some(Duration::from_secs(3))
+    );
+}
+
+#[test]
+fn import_phase_round_trips_historical_messages() {
+    use super::{Phase, Report};
+    use serde_json::{json, to_value};
+
+    for (message, expected) in [
+        ("已完成", Phase::Completed),
+        ("仍有素材待补", Phase::Pending),
+        ("手机会话中断", Phase::SessionInterrupted),
+        ("等待 Apple 原件目录", Phase::AwaitAppleDirectory),
+        ("等待全量复扫", Phase::Message("等待全量复扫".into())),
+    ] {
+        let report: Report = serde_json::from_value(json!({"phase": message})).unwrap();
+        assert_eq!(report.phase, expected);
+        assert_eq!(to_value(report).unwrap()["phase"], message);
+    }
 }
 
 #[cfg(windows)]
@@ -1712,19 +1716,12 @@ fn session_retry_imports_other_media_before_reopening_an_interrupted_family() {
     let run = |session, interrupted: bool| {
         let mut phone = fixture(session, &entries, None);
         phone.session_error = interrupted.then_some(1);
-        transfer_guarded(
-            &dest,
-            "WPD",
-            || Ok(Box::new(phone)),
-            |_| {},
-            || Ok(()),
-            || Ok(()),
-        )
+        transfer(&dest, "WPD", || Ok(Box::new(phone)))
     };
     let first = run(1, true);
     assert_eq!((first.added, first.scanned), (1, 2));
     let second = run(2, true);
-    assert_eq!(&*second.phase, "手机会话中断");
+    assert_eq!(second.phase.as_str(), "手机会话中断");
     assert_eq!(
         (second.added, second.skipped, second.failed, second.scanned),
         (1, 1, 1, 4)

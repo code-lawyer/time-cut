@@ -12,7 +12,7 @@ Photo details show the saved location locally. Opening the online map in photo d
 
 ## Updates and diagnostics
 
-The portable Windows release workflow builds with in-app updates disabled and supplies no Aptabase analytics key. You can update by obtaining another portable package. Custom builds configured with an Aptabase key can send application start and exit events and the platform information collected by the Aptabase SDK.
+Time-cut does not collect usage analytics. To update the Windows portable edition, download a new package from the official Releases page linked in About.
 
 ## Data you share yourself
 

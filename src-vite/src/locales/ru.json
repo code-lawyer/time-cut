@@ -1446,8 +1446,7 @@
         "Максимальный"
       ],
       "show_tool_tip": "Подсказки кнопок",
-      "show_status_bar": "Строка состояния",
-      "auto_check_updates": "Автоматически проверять обновления"
+      "show_status_bar": "Строка состояния"
     },
     "raw": {
       "title": "RAW",
@@ -1851,26 +1850,7 @@
         "feedback": "Обратная связь",
         "privacy": "Конфиденциальность"
       },
-      "section_updates": "Обновления",
-      "auto_update": {
-        "update": "Обновить",
-        "check": "Проверить обновления",
-        "checking": "Проверка...",
-        "install": "Установить и перезапустить",
-        "installing": "Установка...",
-        "new_version_available": "Доступна новая версия: {version}",
-        "latest_version": "У вас новейшая версия.",
-        "downloading_update": "Загрузка обновления...",
-        "downloading_started": "Загрузка началась...",
-        "downloading": "Загрузка... {percent}%",
-        "download_finished": "Загрузка завершена. Установка...",
-        "update_installed": "Обновление установлено. Перезапуск...",
-        "update_installed_waiting_restart": "Обновление установлено. Перезапустите программу.",
-        "release_note": "Примечания к выпуску",
-        "restart": "Перезапустить",
-        "failed_check": "Не удалось проверить обновления",
-        "failed_install": "Не удалось установить обновление"
-      }
+      "section_updates": "Обновления"
     }
   }
 }

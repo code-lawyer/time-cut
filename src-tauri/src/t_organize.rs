@@ -345,15 +345,44 @@ pub struct Organizer {
     wake: mpsc::Sender<()>,
     view: Arc<Mutex<WorkerView>>,
     auto_faces: Arc<Mutex<Option<f32>>>,
+    scene_counts: Mutex<SceneCountCache>,
+}
+
+#[derive(Clone, Serialize)]
+struct SceneCounts {
+    counts: BTreeMap<String, usize>,
+    unavailable: usize,
+    failed: usize,
+    automatic: bool,
+}
+
+#[derive(Default)]
+struct SceneCountCache {
+    snapshot: Option<((u64, i64), SceneCounts)>,
+}
+
+impl SceneCountCache {
+    fn get(
+        &mut self,
+        revision: Option<(u64, i64)>,
+        load: impl FnOnce() -> Result<SceneCounts, String>,
+    ) -> Result<SceneCounts, String> {
+        if let Some((previous, counts)) = &self.snapshot
+            && Some(*previous) == revision
+        {
+            return Ok(counts.clone());
+        }
+        let counts = load()?;
+        self.snapshot = revision.map(|revision| (revision, counts.clone()));
+        Ok(counts)
+    }
 }
 
 #[derive(Serialize)]
 pub struct SceneStatus {
     library: String,
-    counts: BTreeMap<String, usize>,
-    unavailable: usize,
-    failed: usize,
-    automatic: bool,
+    #[serde(flatten)]
+    summary: SceneCounts,
     running: bool,
     error: Option<String>,
 }
@@ -374,47 +403,61 @@ pub fn timecut_file_scene(library: String, file_id: i64) -> Result<FileScene, St
     })
 }
 
+fn read_scene_counts() -> Result<SceneCounts, String> {
+    let conn = t_sqlite::open_conn()?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {}, COUNT(*), sum(s.issue='offline'), sum(s.issue='decode')
+            FROM afiles a JOIN afolders b ON b.id=a.folder_id LEFT JOIN timecut_scenes s ON s.file_id=a.id
+            WHERE {} GROUP BY 1", category_expression(), visible_media()
+    )).map_err(|e| e.to_string())?;
+    let mut counts = BTreeMap::new();
+    let (mut unavailable, mut failed) = (0, 0);
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let count: usize = row.get(1).map_err(|e| e.to_string())?;
+        let category: String = row.get(0).map_err(|e| e.to_string())?;
+        if category == "pending" {
+            unavailable += row
+                .get::<_, Option<usize>>(2)
+                .map_err(|e| e.to_string())?
+                .unwrap_or(0);
+            failed += row
+                .get::<_, Option<usize>>(3)
+                .map_err(|e| e.to_string())?
+                .unwrap_or(0);
+        }
+        counts.insert(category, count);
+    }
+    Ok(SceneCounts {
+        counts,
+        unavailable,
+        failed,
+        automatic: auto_scenes(&conn).map_err(|e| e.to_string())?,
+    })
+}
+
 #[tauri::command]
 pub fn timecut_scene_status(
     library: String,
     state: State<Organizer>,
 ) -> Result<SceneStatus, String> {
     with_current_library(&library, || {
-        let conn = t_sqlite::open_conn()?;
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {}, COUNT(*), sum(s.issue='offline'), sum(s.issue='decode')
-                FROM afiles a JOIN afolders b ON b.id=a.folder_id LEFT JOIN timecut_scenes s ON s.file_id=a.id
-                WHERE {} GROUP BY 1", category_expression(), visible_media()
-        )).map_err(|e| e.to_string())?;
-        let mut counts = BTreeMap::new();
-        let (mut unavailable, mut failed) = (0, 0);
-        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let count: usize = row.get(1).map_err(|e| e.to_string())?;
-            let category: String = row.get(0).map_err(|e| e.to_string())?;
-            if category == "pending" {
-                unavailable += row
-                    .get::<_, Option<usize>>(2)
-                    .map_err(|e| e.to_string())?
-                    .unwrap_or(0);
-                failed += row
-                    .get::<_, Option<usize>>(3)
-                    .map_err(|e| e.to_string())?
-                    .unwrap_or(0);
-            }
-            counts.insert(category, count);
+        if t_sqlite::is_database_corrupted() {
+            return Err(t_sqlite::DB_CORRUPTED_MSG.into());
         }
+        let summary = {
+            let mut cache = state.scene_counts.lock().map_err(|e| e.to_string())?;
+            // Sample before reading the counts so a concurrent commit triggers a reload.
+            cache.get(t_sqlite::library_revision().ok(), read_scene_counts)?
+        };
         let view = state.view.lock().unwrap();
         Ok(SceneStatus {
             running: view.library == library && view.running,
             error: (view.library == library)
                 .then(|| view.error.clone())
                 .flatten(),
-            library: library.clone(),
-            counts,
-            unavailable,
-            failed,
-            automatic: auto_scenes(&conn).map_err(|e| e.to_string())?,
+            library,
+            summary,
         })
     })
 }
@@ -579,6 +622,7 @@ pub fn start(app: AppHandle) {
         wake,
         view: view.clone(),
         auto_faces: auto_faces.clone(),
+        scene_counts: Mutex::default(),
     });
     let runtime = tauri::async_runtime::handle();
     std::thread::spawn(move || {
@@ -650,6 +694,31 @@ pub fn start(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scene_counts_are_reused_until_the_catalog_changes() {
+        let mut cache = SceneCountCache::default();
+        let mut loaded = 0;
+        let mut load = || {
+            loaded += 1;
+            Ok(SceneCounts {
+                counts: BTreeMap::from([("pending".into(), loaded)]),
+                unavailable: 0,
+                failed: 0,
+                automatic: true,
+            })
+        };
+        for (revision, expected) in [
+            (Some((1, 1)), 1),
+            (Some((1, 1)), 1),
+            (Some((1, 2)), 2),
+            (Some((2, 2)), 3), // the library was reopened or switched
+            (None, 4), // the observer is temporarily unavailable
+            (None, 5),
+        ] {
+            assert_eq!(cache.get(revision, &mut load).unwrap().counts["pending"], expected);
+        }
+    }
 
     #[test]
     fn idle_organizer_wakes_for_changes_or_a_due_retry() {

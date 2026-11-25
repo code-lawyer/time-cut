@@ -15,13 +15,16 @@ struct Entry {
 pub(super) struct PhoneQueue {
     source: String,
     known_paths: HashSet<String>,
+    #[cfg(test)]
     known_families: HashSet<String>,
     received_versions: HashMap<String, HashSet<String>>,
     pending: HashSet<Entry>,
     interrupted: HashMap<String, i64>,
     occurrences: HashMap<(String, String), u32>,
     handles: HashMap<String, Entry>,
+    #[cfg(test)]
     missing_members: HashSet<String>,
+    #[cfg(test)]
     postponed: Vec<Item>,
     inventory: Vec<[u8; 32]>,
 }
@@ -78,11 +81,13 @@ impl PhoneQueue {
             tx.commit()?;
         }
         let mut known_paths = HashSet::new();
+        #[cfg(test)]
         let mut known_families = HashSet::new();
         let mut archived = db.prepare("SELECT entry,family FROM sources WHERE source=?")?;
         let mut rows = archived.query([source])?;
         while let Some(row) = rows.next()? {
             known_paths.insert(row.get(0)?);
+            #[cfg(test)]
             known_families.insert(row.get(1)?);
         }
         let mut pending = HashSet::new();
@@ -106,13 +111,16 @@ impl PhoneQueue {
         Ok(Self {
             source: source.to_owned(),
             known_paths,
+            #[cfg(test)]
             known_families,
             received_versions: HashMap::new(),
             pending,
             interrupted,
             occurrences: HashMap::new(),
             handles: HashMap::new(),
+            #[cfg(test)]
             missing_members: HashSet::new(),
+            #[cfg(test)]
             postponed: Vec::new(),
             inventory: Vec::new(),
         })
@@ -188,15 +196,18 @@ impl PhoneQueue {
                 .get(&entry.path)
                 .is_some_and(|stored| stored.contains(version))
         });
-        if !known_version && self.known_paths.contains(&entry.path) {
+        let lookup_version = !known_version && self.known_paths.contains(&entry.path);
+        #[cfg(test)]
+        if !lookup_version && self.known_families.contains(&group) {
+            self.missing_members.insert(group.clone());
+        }
+        if lookup_version {
             if let Some(version) = &item.version {
                 known_version = db.prepare_cached("SELECT EXISTS(
                     SELECT 1 FROM sources WHERE source=?1 AND entry=?2 AND version=?3
                     UNION ALL SELECT 1 FROM source_versions WHERE source=?1 AND entry=?2 AND version=?3)")?
                     .query_row(params![self.source, entry.path, version], |r| r.get(0))?;
             }
-        } else if self.known_families.contains(&group) {
-            self.missing_members.insert(group.clone());
         }
         if !known_version {
             self.remember(db, &entry, &group, item.version.as_deref())?;
@@ -220,6 +231,7 @@ impl PhoneQueue {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn defer(&mut self, item: &Item) -> bool {
         let group = family(&item.relative);
         if self.known_families.contains(&group) || self.interrupted.contains_key(&group) {
@@ -229,6 +241,7 @@ impl PhoneQueue {
         false
     }
 
+    #[cfg(test)]
     pub fn take_postponed(&mut self) -> Vec<Item> {
         let mut items = std::mem::take(&mut self.postponed);
         // Stable sorting preserves the provider's primary-before-companion ordering.

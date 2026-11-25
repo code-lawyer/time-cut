@@ -1445,8 +1445,7 @@
         "Lớn hơn"
       ],
       "show_tool_tip": "Hiện chú thích cho nút",
-      "show_status_bar": "Hiện thanh trạng thái",
-      "auto_check_updates": "Tự động kiểm tra cập nhật"
+      "show_status_bar": "Hiện thanh trạng thái"
     },
     "raw": {
       "title": "RAW",
@@ -1860,26 +1859,7 @@
         "feedback": "Phản hồi",
         "privacy": "Quyền riêng tư"
       },
-      "section_updates": "Cập nhật",
-      "auto_update": {
-        "update": "Cập nhật",
-        "check": "Kiểm tra cập nhật",
-        "checking": "Đang kiểm tra...",
-        "install": "Cài đặt và khởi động lại",
-        "installing": "Đang cài đặt...",
-        "new_version_available": "Có phiên bản mới: {version}",
-        "latest_version": "Bạn đang dùng phiên bản mới nhất.",
-        "downloading_update": "Đang tải xuống bản cập nhật...",
-        "downloading_started": "Đã bắt đầu tải xuống...",
-        "downloading": "Đang tải xuống... {percent}%",
-        "download_finished": "Đã tải xuống xong. Đang cài đặt...",
-        "update_installed": "Đã cài đặt bản cập nhật. Đang khởi động lại...",
-        "update_installed_waiting_restart": "Đã cài đặt bản cập nhật. Vui lòng khởi động lại ứng dụng.",
-        "release_note": "Ghi chú phát hành",
-        "restart": "Khởi động lại",
-        "failed_check": "Không thể kiểm tra cập nhật",
-        "failed_install": "Không thể cài đặt bản cập nhật"
-      }
+      "section_updates": "Cập nhật"
     }
   }
 }

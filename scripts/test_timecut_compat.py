@@ -11,6 +11,11 @@ import sys
 import tempfile
 import urllib.request
 
+if __package__:
+    from .fetch_timecut_ffmpeg import prepare as verify_windows_ffmpeg
+else:
+    from fetch_timecut_ffmpeg import prepare as verify_windows_ffmpeg
+
 
 ROOT = Path(__file__).resolve().parents[1]
 OSXPHOTOS = (
@@ -98,7 +103,7 @@ def prepare(cache, folder):
     (folder / "raw-paths.txt").write_text(f"{folder / 'nikon-e5700.nef'}\n{folder / RAW}\n", encoding="utf-8")
 
 
-def run_test(binary, folder, name):
+def run_test(binary, folder, name, media_tools=None):
     with tempfile.TemporaryDirectory() as runtime:
         env = os.environ.copy()
         env.pop("TIMECUT_DATA_DIR", None)
@@ -117,6 +122,8 @@ def run_test(binary, folder, name):
         if os.name == "nt" and env.get("ORT_LIB_LOCATION"):
             ort = Path(env["ORT_LIB_LOCATION"])
             env["PATH"] = os.pathsep.join([str(ort), str(ort / "lib"), env["PATH"]])
+        if media_tools is not None:
+            env["TIMECUT_TEST_FFMPEG_DIR"] = str(media_tools)
         result = subprocess.run([binary, "--ignored", "--exact", name], env=env, cwd=ROOT,
                                 capture_output=True, text=True, errors="replace", timeout=180)
         passed = (result.returncode == 0 and f"test {name} ... ok" in result.stdout
@@ -134,10 +141,14 @@ def main():
                         help="directory for hash-verified downloads")
     args = parser.parse_args()
     binary = args.test_binary.resolve(strict=True)
+    media_tools = None
+    if os.name == "nt":
+        media_tools = ROOT / "src-tauri/resources/ffmpeg"
+        verify_windows_ffmpeg(media_tools, verify_only=True)
     with tempfile.TemporaryDirectory() as temp:
         folder = Path(temp)
         prepare(args.cache, folder)
-        passed = sum(run_test(binary, folder, name) for name in TESTS)
+        passed = sum(run_test(binary, folder, name, media_tools) for name in TESTS)
     print(f"{passed}/{len(TESTS)} external media compatibility tests passed.")
     return 0 if passed == len(TESTS) else 1
 

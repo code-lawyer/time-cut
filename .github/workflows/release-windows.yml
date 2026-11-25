@@ -65,12 +65,14 @@ jobs:
           node --experimental-vm-modules --test "tests/*.test.mjs" "tests/*.test.ts"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pnpm build
-      - name: Build and test the bundled browser demo
+      - name: Test import and packaging scripts
         run: |
           python -m unittest discover -s scripts/tests -v
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node --test "scripts/tests/*.test.mjs"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build and test the bundled browser demo
+        if: github.ref_type != 'tag'
+        run: |
           node docs/scripts/build-native-demo.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node --experimental-vm-modules --test "docs/tests/*.test.mjs"
@@ -125,6 +127,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: timecut-windows-x64
@@ -142,3 +145,7 @@ jobs:
             assets/*-source.tar.gz
             assets/*-source.tar.gz.sha256
           fail_on_unmatched_files: true
+      - name: Attach corresponding FFmpeg sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/copy_windows_ffmpeg_sources.py "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME"

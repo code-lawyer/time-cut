@@ -93,9 +93,11 @@ onMounted(async () => {
     });
     if (!active) { unsubscribe(); return; }
     unlisten = unsubscribe;
-    await refresh();
-    if (active) timer = setInterval(refresh, 2500);
   } catch (reason) { if (active) error.value = String(reason); }
+  if (!active) return;
+  void refresh();
+  // The backend reuses counts for the same catalog revision.
+  timer = setInterval(refresh, 5000);
 });
 onUnmounted(() => { active = false; clearInterval(timer); unlisten?.(); });
 </script>

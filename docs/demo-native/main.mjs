@@ -117,7 +117,6 @@ if (saved) {
   config.collectionTray.expanded = true;
   config.settings.appearance = 1;
   config.settings.darkTheme = 0;
-  config.settings.autoCheckUpdates = false;
   config.settings.face.enabled = true;
   config.settings.grid.style = 2;
   config.settings.grid.sizePosition = 0.2;

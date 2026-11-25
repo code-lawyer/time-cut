@@ -5,6 +5,8 @@ mod afc;
 mod capture;
 mod inbox;
 mod inventory;
+#[cfg(test)]
+mod legacy_fixture;
 mod local_work;
 #[cfg(windows)]
 mod notice;
@@ -20,7 +22,6 @@ mod verification;
 mod wpd;
 
 use archive::{Archive, Folder, Result, ScanEvent, Source};
-use resume::PhoneQueue;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -39,11 +40,80 @@ pub struct Target {
     auto: bool,
 }
 
+// The history and frontend use the original string representation. Scheduling
+// uses the states below so that new display messages cannot change retry rules.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(from = "String")]
+enum Phase {
+    #[default]
+    Idle,
+    Completed,
+    Pending,
+    AwaitAppleDirectory,
+    MediaUnavailable,
+    SessionInterrupted,
+    ContentMismatch,
+    AppleNeedsSupplement,
+    Message(String),
+}
+
+impl Phase {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Idle => "",
+            Self::Completed => "已完成",
+            Self::Pending => "仍有素材待补",
+            Self::AwaitAppleDirectory => "等待 Apple 原件目录",
+            Self::MediaUnavailable => "手机媒体暂不可读",
+            Self::SessionInterrupted => "手机会话中断",
+            Self::ContentMismatch => "手机返回内容与清单不符",
+            Self::AppleNeedsSupplement => "Apple 相机原件待补",
+            Self::Message(text) => text,
+        }
+    }
+}
+
+impl From<String> for Phase {
+    fn from(text: String) -> Self {
+        [
+            Self::Idle,
+            Self::Completed,
+            Self::Pending,
+            Self::AwaitAppleDirectory,
+            Self::MediaUnavailable,
+            Self::SessionInterrupted,
+            Self::ContentMismatch,
+            Self::AppleNeedsSupplement,
+        ]
+        .into_iter()
+        .find(|phase| phase.as_str() == text.as_str())
+        .unwrap_or(Self::Message(text))
+    }
+}
+
+impl From<&str> for Phase {
+    fn from(text: &str) -> Self {
+        Self::from(text.to_owned())
+    }
+}
+
+impl Serialize for Phase {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Report {
     source: String,
-    phase: String,
+    phase: Phase,
     current: String,
     scanned: u64,
     discovered: u64,
@@ -444,13 +514,13 @@ enum TransferStop {
 
 #[cfg(windows)]
 impl TransferStop {
-    fn phase(self) -> &'static str {
+    fn phase(self) -> Phase {
         match self {
-            Self::AutoDisabled => "已停止自动导入",
-            Self::DestinationChanged => "图库已更改，等待重新检测",
-            Self::Disconnected => "设备已断开",
-            Self::SessionInterrupted => "手机会话中断",
-            Self::ContentMismatch => "手机返回内容与清单不符",
+            Self::AutoDisabled => "已停止自动导入".into(),
+            Self::DestinationChanged => "图库已更改，等待重新检测".into(),
+            Self::Disconnected => "设备已断开".into(),
+            Self::SessionInterrupted => Phase::SessionInterrupted,
+            Self::ContentMismatch => Phase::ContentMismatch,
         }
     }
 }
@@ -458,79 +528,50 @@ impl TransferStop {
 #[cfg(windows)]
 impl std::fmt::Display for TransferStop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.phase())
+        f.write_str(self.phase().as_str())
     }
 }
 
 #[cfg(windows)]
 impl std::error::Error for TransferStop {}
 
-fn transfer<F>(root: &Path, name: &str, make_source: F, update: impl FnMut(&Report)) -> Report
-where
-    F: FnOnce() -> Result<Box<dyn Source>>,
-{
-    transfer_guarded(root, name, make_source, update, || Ok(()), || Ok(()))
-}
-
-fn transfer_guarded<F, Guard>(
+fn copy_folder<Guard>(
     root: &Path,
-    name: &str,
-    make_source: F,
+    path: &Path,
     mut update: impl FnMut(&Report),
     mut check_destination: impl FnMut() -> Result<Guard>,
     mut check_active: impl FnMut() -> Result<()>,
-) -> Report
-where
-    F: FnOnce() -> Result<Box<dyn Source>>,
-{
+) -> Report {
     let mut report = Report {
-        source: name.into(),
+        source: path.to_string_lossy().into_owned(),
         phase: "检查图库".into(),
         ..Default::default()
     };
     update(&report);
     let run = (|| -> Result<()> {
         check_active()?;
-        let source = make_source()?;
-        report.phone = source.is_phone();
-        let (mut archive, mut queue) = {
+        let source = Folder::new(path, root)?;
+        let mut archive = {
             let _guard = check_destination()?;
-            let archive = Archive::open(root)?;
-            let queue = if report.phone {
-                report.device_key = Some(verification::device_key(source.identity()));
-                Some(PhoneQueue::open(&archive.db, source.identity())?)
-            } else {
-                None
-            };
-            (archive, queue)
+            Archive::open(root)?
         };
-        report.pending = queue.as_ref().map_or(0, PhoneQueue::count);
         let mut reconciled = false;
         report.phase = "正在读取".into();
         update(&report);
         let mut last = Instant::now();
-        let mut publish_status = |status: &Report, immediately: bool| {
+        let mut publish = |status: &Report, immediately: bool| {
             if immediately || last.elapsed() >= Duration::from_millis(150) {
                 update(status);
                 last = Instant::now();
             }
         };
-        let mut receive = |event, scanning: bool, queue: &mut Option<PhoneQueue>| -> Result<()> {
+        source.visit(&mut |event| {
             check_active()?;
             let item = match event {
-                ScanEvent::DirectoryFound(_) | ScanEvent::DirectoryStart(_) | ScanEvent::DirectoryDone { .. } | ScanEvent::DirectoryCheck { .. } => return Ok(()),
                 ScanEvent::Inspected { media } => {
                     report.scanned += 1;
                     report.discovered += u64::from(media);
-                    publish_status(&report, report.scanned == 1);
-                    return Ok(());
-                }
-                ScanEvent::CompanionFound(item) => {
-                    if let Some(q) = queue {
-                        let _guard = check_destination()?;
-                        q.discover(&archive.db, &item)?;
-                        report.pending = q.count();
-                    }
+                    publish(&report, report.scanned == 1);
                     return Ok(());
                 }
                 ScanEvent::Unreadable(message) => {
@@ -538,69 +579,38 @@ where
                     return Ok(());
                 }
                 ScanEvent::Ready(item) => item,
+                _ => return Ok(()),
             };
             let _guard = check_destination()?;
-            if let Some(q) = queue {
-                q.discover(&archive.db, &item)?;
-                report.pending = q.count();
-                if scanning && q.defer(&item) {
-                    return Ok(());
-                }
-            }
             if !reconciled {
-                // A locked or empty phone will retry while it is connected. Only scan the
-                // gallery when the source actually has its first readable media object.
                 archive.reconcile()?;
                 reconciled = true;
             }
             report.phase = "正在复制".into();
             report.current = item.relative.to_string_lossy().into_owned();
             report.total_bytes = item.size;
-            publish_status(&report, report.added + report.skipped == 0);
-            let result = archive.import_tracked(
-                source.as_ref(),
-                &item,
-                |db| {
-                    if let Some(q) = queue {
-                        q.attempting(db, &item, None)?;
-                    }
-                    Ok(())
-                },
-                |bytes| {
-                    report.transferred_bytes = bytes;
-                    publish_status(&report, false);
-                    check_active()
-                },
-            );
-            if let Some(q) = queue {
-                match &result {
-                    Ok((_, digest)) => q.verified(&archive.db, &item, digest)?,
-                    Err(error) => q.attempting(&archive.db, &item, Some(&error.to_string()))?,
-                }
-                report.pending = q.count();
-            }
+            publish(&report, report.added + report.skipped == 0);
+            let result = archive.import(&source, &item, |bytes| {
+                report.transferred_bytes = bytes;
+                publish(&report, false);
+                check_active()
+            });
             let first_original = match result {
-                Ok((true, _)) => {
+                Ok(true) => {
                     report.added += 1;
                     report.added == 1
                 }
-                Ok((false, _)) => {
+                Ok(false) => {
                     report.skipped += 1;
                     false
                 }
-                Err(e) => {
+                Err(error) => {
                     #[cfg(windows)]
-                    if e.is::<TransferStop>() {
-                        return Err(e);
-                    }
-                    #[cfg(windows)]
-                    if report.phone && let Some(stop) = wpd::interruption(e.as_ref()) {
-                        let message = format!("{}：{e}", report.current);
-                        issue(&mut report, message);
-                        return Err(stop.into());
+                    if error.is::<TransferStop>() {
+                        return Err(error);
                     }
                     check_active()?;
-                    let message = format!("{}：{e}", report.current);
+                    let message = format!("{}：{error}", report.current);
                     issue(&mut report, message);
                     false
                 }
@@ -609,26 +619,9 @@ where
             report.current.clear();
             report.total_bytes = None;
             report.transferred_bytes = 0;
-            publish_status(&report, first_original);
+            publish(&report, first_original);
             Ok(())
-        };
-        source.visit(&mut |event| receive(event, true, &mut queue))?;
-        for item in queue
-            .as_mut()
-            .map(PhoneQueue::take_postponed)
-            .unwrap_or_default()
-        {
-            receive(ScanEvent::Ready(item), false, &mut queue)?;
-        }
-        if let Some(q) = queue.as_mut()
-            && report.failed == 0
-            && report.pending == 0
-            && report.discovered > 0
-            && report.added + report.skipped == report.discovered
-        {
-            report.inventory = Some(q.inventory_digest());
-        }
-        Ok(())
+        })
     })();
     report.current.clear();
     report.total_bytes = None;
@@ -636,46 +629,40 @@ where
     if let Err(error) = run {
         #[cfg(windows)]
         if let Some(stop) = error.downcast_ref::<TransferStop>() {
-            report.phase = stop.phase().into();
-            return report;
-        }
-        #[cfg(windows)]
-        if let Some(stop) = wpd::interruption(error.as_ref()) {
-            issue(&mut report, error.to_string());
-            report.phase = stop.phase().into();
+            report.phase = stop.phase();
             return report;
         }
         issue(&mut report, error.to_string());
     }
     report.phase = if report.failed > 0 {
-        "部分未完成"
-    } else if report.phone && report.discovered == 0 {
-        "手机媒体暂不可读"
-    } else if report.pending > 0
-        || (report.phone && report.discovered != report.added + report.skipped)
-    {
-        "仍有素材待补"
+        "部分未完成".into()
     } else if report.added + report.skipped == 0 {
-        "未发现可读照片或视频"
+        "未发现可读照片或视频".into()
     } else {
-        "已完成"
-    }
-    .into();
+        Phase::Completed
+    };
     report
 }
 
-fn job<F>(
+#[derive(Clone, Copy)]
+enum ImportSource<'a> {
+    Folder(&'a Path),
+    #[cfg(windows)]
+    Phone(&'a wpd::Device),
+}
+
+fn job(
     app: &AppHandle,
     view: &Arc<Mutex<View>>,
     dest: &Target,
-    label: &str,
-    phone: bool,
-    make_source: F,
+    source: ImportSource<'_>,
     check_active: impl FnMut() -> Result<()>,
-) -> Result<Report>
-where
-    F: FnOnce() -> Result<Box<dyn Source>>,
-{
+) -> Result<Report> {
+    let (label, phone) = match source {
+        ImportSource::Folder(path) => (path.to_string_lossy(), false),
+        #[cfg(windows)]
+        ImportSource::Phone(device) => (std::borrow::Cow::Borrowed(device.name.as_str()), true),
+    };
     // A crash may occur after publishing an original and before requesting an index. The
     // durable marker covers this entire window and disappears in the completion transaction.
     let db = control()?;
@@ -686,7 +673,7 @@ where
         }
         db.execute(
             "INSERT OR REPLACE INTO phone_work VALUES(?,?,?)",
-            params![dest.library, dest.album, label],
+            params![dest.library, dest.album, label.as_ref()],
         )?;
     } else {
         db.execute(
@@ -720,31 +707,23 @@ where
         }
     };
     let guard = catalog::guard_destination(dest, catalog::album_path);
-    let mut report = if phone {
-        capture::receive(
-            Path::new(&dest.root),
-            label,
+    let root = Path::new(&dest.root);
+    let mut report = match source {
+        ImportSource::Folder(path) => copy_folder(root, path, progress, guard, check_active),
+        #[cfg(windows)]
+        ImportSource::Phone(device) => capture::receive(
+            root,
+            &label,
             |(key, scope)| verification::capture_minimum(&db, dest, key, scope),
-            make_source,
+            || Ok(Box::new(wpd::Phone::open(device)?)),
             progress,
             guard,
             check_active,
-        )
-    } else {
-        transfer_guarded(
-            Path::new(&dest.root),
-            label,
-            make_source,
-            progress,
-            guard,
-            check_active,
-        )
+        ),
     };
     let tx = db.unchecked_transaction()?;
     if phone {
         verification::observe_requested_repeat(&tx, dest, &mut report)?;
-    } else {
-        verification::observe(&tx, dest, &mut report)?;
     }
     if !phone && report.added > 0 {
         request_index(&tx, &dest.library, dest.album)?;
@@ -817,11 +796,11 @@ fn next_phone_retry(report: &Report, previous: Option<Duration>) -> Option<Durat
     if report.safe_at.is_some() {
         return report.repeat_due.then_some(Duration::from_secs(3));
     }
-    if report.failed == 0 && report.pending == 0 && report.phase == "已完成" {
+    if report.failed == 0 && report.pending == 0 && report.phase == Phase::Completed {
         return None;
     }
     let first = Duration::from_secs(20);
-    if report.newly_verified > 0 && report.failed == 0 && report.phase == "仍有素材待补" {
+    if report.newly_verified > 0 && report.failed == 0 && report.phase == Phase::Pending {
         return Some(Duration::from_secs(3));
     }
     Some(if report.added > 0 || report.newly_verified > 0 {
@@ -901,18 +880,7 @@ fn worker(app: &AppHandle, view: &Arc<Mutex<View>>, rx: &mpsc::Receiver<Wake>) -
                 }
             }
             job(
-                app,
-                view,
-                &dest,
-                &path,
-                false,
-                || {
-                    Ok(Box::new(Folder::new(
-                        Path::new(&path),
-                        Path::new(&dest.root),
-                    )?))
-                },
-                || Ok(()),
+                app, view, &dest, ImportSource::Folder(Path::new(&path)), || Ok(()),
             )?;
             // A rename/remove during a transfer is resolved at the top of the next pass.
             // Keep the durable request so that a moved destination resumes automatically.
@@ -972,9 +940,7 @@ fn worker(app: &AppHandle, view: &Arc<Mutex<View>>, rx: &mpsc::Receiver<Wake>) -
                             app,
                             view,
                             &dest,
-                            &d.name,
-                            true,
-                            || Ok(Box::new(wpd::Phone::open(&d)?)),
+                            ImportSource::Phone(&d),
                             || {
                                 {
                                     let live = view.lock().unwrap();
@@ -996,7 +962,8 @@ fn worker(app: &AppHandle, view: &Arc<Mutex<View>>, rx: &mpsc::Receiver<Wake>) -
                                 Ok(())
                             },
                         )?;
-                        let find_camera = report.phase == "等待 Apple 原件目录" || report.device_key.is_none();
+                        let find_camera = report.phase == Phase::AwaitAppleDirectory
+                            || report.device_key.is_none();
                         if (find_camera || afc::supplement::stalled(&report))
                             && d.is_apple()
                             && native_checks.get(&d.id).is_none_or(|last| last.elapsed() >= Duration::from_secs(120)) {
@@ -1212,12 +1179,7 @@ pub fn command_line() -> Option<i32> {
             crate::t_video::init_portable_ffmpeg_path();
             let src = Path::new(&args[2]);
             let root = Path::new(&args[3]);
-            let report = transfer(
-                root,
-                &src.to_string_lossy(),
-                || Ok(Box::new(Folder::new(src, root)?)),
-                |_| {},
-            );
+            let report = copy_folder(root, src, |_| {}, || Ok(()), || Ok(()));
             println!("{}", serde_json::to_string(&report).unwrap());
             Some(if report.failed == 0 { 0 } else { 1 })
         }

@@ -1446,8 +1446,7 @@
         "Nagyobb"
       ],
       "show_tool_tip": "Gombtippek megjelenítése",
-      "show_status_bar": "Állapotsor megjelenítése",
-      "auto_check_updates": "Frissítések automatikus keresése"
+      "show_status_bar": "Állapotsor megjelenítése"
     },
     "raw": {
       "title": "RAW",
@@ -1851,26 +1850,7 @@
         "feedback": "Visszajelzés",
         "privacy": "Adatvédelem"
       },
-      "section_updates": "Frissítések",
-      "auto_update": {
-        "update": "Frissítés",
-        "check": "Frissítések keresése",
-        "checking": "Ellenőrzés...",
-        "install": "Telepítés és újraindítás",
-        "installing": "Telepítés...",
-        "new_version_available": "Új verzió érhető el: {version}",
-        "latest_version": "Ön a legújabb verziót használja.",
-        "downloading_update": "Frissítés letöltése...",
-        "downloading_started": "Elindult a letöltés...",
-        "downloading": "Letöltés... {percent}%",
-        "download_finished": "Letöltés kész. Telepítés...",
-        "update_installed": "Frissítés telepítve. Újraindítás...",
-        "update_installed_waiting_restart": "Frissítés telepítve. Kérjük, indítsa újra az alkalmazást.",
-        "release_note": "Kiadási megjegyzések",
-        "restart": "Újraindítás",
-        "failed_check": "Nem sikerült ellenőrizni a frissítéseket",
-        "failed_install": "Nem sikerült telepíteni a frissítést"
-      }
+      "section_updates": "Frissítések"
     }
   }
 }

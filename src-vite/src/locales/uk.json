@@ -1446,8 +1446,7 @@
         "Найбільший"
       ],
       "show_tool_tip": "Показувати підказки кнопок",
-      "show_status_bar": "Показувати рядок стану",
-      "auto_check_updates": "Автоматично перевіряти оновлення"
+      "show_status_bar": "Показувати рядок стану"
     },
     "raw": {
       "title": "RAW",
@@ -1851,26 +1850,7 @@
         "feedback": "Відгук",
         "privacy": "Конфіденційність"
       },
-      "section_updates": "Оновлення",
-      "auto_update": {
-        "update": "Оновити",
-        "check": "Перевірити оновлення",
-        "checking": "Перевірка...",
-        "install": "Установити та перезапустити",
-        "installing": "Установлення...",
-        "new_version_available": "Доступна нова версія: {version}",
-        "latest_version": "У вас найновіша версія.",
-        "downloading_update": "Завантаження оновлення...",
-        "downloading_started": "Завантаження розпочато...",
-        "downloading": "Завантаження... {percent}%",
-        "download_finished": "Завантаження завершено. Установлення...",
-        "update_installed": "Оновлення встановлено. Перезапуск...",
-        "update_installed_waiting_restart": "Оновлення встановлено. Перезапустіть застосунок.",
-        "release_note": "Примітки до випуску",
-        "restart": "Перезапустити",
-        "failed_check": "Не вдалося перевірити оновлення",
-        "failed_install": "Не вдалося встановити оновлення"
-      }
+      "section_updates": "Оновлення"
     }
   }
 }

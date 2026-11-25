@@ -1660,9 +1660,6 @@ watch(() => config.settings.showToolTip, (newValue) => {
 watch(() => config.settings.showStatusBar, (newValue) => {
   emit('settings-showStatusBar-changed', newValue);
 });
-watch(() => config.settings.autoCheckUpdates, (newValue) => {
-  emit('settings-autoCheckUpdates-changed', newValue);
-});
 // watch(() => config.settings.showComment, (newValue) => {
 //   emit('settings-showComment-changed', newValue);
 // });

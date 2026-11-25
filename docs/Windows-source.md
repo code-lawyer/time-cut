@@ -14,4 +14,4 @@ Windows 程序静态链接 LibRaw、libjpeg-turbo、libheif 和 libde265。完�
 
 Release 附有 `FFmpeg-8.1.3-a8029b65-win64-source-part1.zip`、`part2.zip`、`part3.zip`（后两份使用相同文件名前缀）及 `FFmpeg-8.1.3-a8029b65-win64-source.sha256`。按校验文件核对三份 ZIP 后，将它们解压到同一空目录。三份合起来包含 FFmpeg 源码、原始配方、补丁和上游本次构建实际启用的 102 份依赖源码。在安装了 Docker Buildx、Bash、Python 3 和 GNU tar 的 Linux x86_64 主机运行 `bash rebuild_ffmpeg_from_source.sh` 可使用随附源码重建。Docker 需要获取基础系统/工具链镜像。程序的实际编译选项可用 `ffmpeg -buildconf` 查看。
 
-使用之前下载的官方发行包还原同一版本的 FFmpeg 工具，请运行 `./scripts/download_ffmpeg_sidecar.ps1 -Arch x64 -Archive <上游或Time-cut便携ZIP>`。脚本逐个核对可执行文件的 SHA-256。要使用自行修改的 FFmpeg，可替换自己解压目录下 `ffmpeg` 内相应文件。项目依赖声明保留发布版的固定摘要，供用户验证官方下载。
+如果上游 ZIP 已撤下，下载脚本会查找最近公开的 Time-cut Windows x64 包，包括预览版。也可以运行 `./scripts/download_ffmpeg_sidecar.ps1 -Arch x64 -Archive <上游或Time-cut便携ZIP>` 从本地 ZIP 恢复固定版本。脚本逐个核对可执行文件的 SHA-256。要使用自行修改的 FFmpeg，可替换自己解压目录下 `ffmpeg` 内相应文件。项目依赖声明保留发布版的固定摘要，供用户验证官方下载。

@@ -73,13 +73,13 @@ cargo build --locked --release --manifest-path src-tauri/Cargo.toml
 .\scripts\package_timecut_windows.ps1
 ```
 
-生成的便携目录、ZIP 和同名 `.sha256` 校验文件位于项目的 `release-test`。可用 `-OutputDirectory <目录>` 指定其他输出位置。同版本重打包会复用完全相同的展开目录；若内容不同，先保留上份目录，再发布干净的新目录。每个新包从干净目录组装，并在包内 `BUILD-INFO.json` 记录打包时的 Git 提交、工作树是否有修改、子模块提交和程序的 SHA-256。
+打包默认在 `release-test` 生成便携 ZIP 和同名 `.sha256` 校验文件。可用 `-OutputDirectory <目录>` 指定输出位置。需要同时保留展开目录时加 `-KeepUnpacked`，只需要展开目录时用 `-SkipZip`。显式输出同版本展开目录时，脚本会复用相同内容，或先保留此前目录再写入新目录。包内 `BUILD-INFO.json` 记录 Git 提交、工作树状态、子模块提交和程序的 SHA-256。
 
-GitHub 的 **Time-cut Windows x64** 工作流在拉取请求、main 更新和手动运行时生成候选产物。推送与源码版本一致的 `timecut-v<版本>` 标签后，会从该提交构建 x64 便携包，校验解压后的程序并运行桌面及恢复测试。工作流把便携 ZIP 和完整子模块源码包连同校验文件放入同标签的 Release 草稿。维护者核对实际发布的包，并补齐 FFmpeg 对应源码和校验文件后公开草稿。源码和静态库重建方式见随包许可证目录的 `Windows-source.md`。[Windows 对应源码说明](Windows-source.md)
+GitHub 的 **Time-cut Windows x64** 工作流在拉取请求、main 更新和手动运行时生成候选产物。推送与源码版本一致的 `timecut-v<版本>` 标签后，工作流从该提交构建并检验 x64 便携包，并将 ZIP 和应用源码包连同校验文件放入 Release 草稿。当最近的公开 Release 仍有匹配的 FFmpeg 对应源码时，工作流逐份校验后将其复制到草稿。若工作流未找到匹配文件，维护者可依据仓库中的 `scripts/windows_ffmpeg_sources.sha256` 补齐，再核对草稿并公开。源码和静态库重建方式见随包许可证目录的 `Windows-source.md`。[Windows 对应源码说明](Windows-source.md)
 
 导入核心测试可用 `cargo test --release --manifest-path src-tauri/Cargo.toml ingest::` 运行。
 
-使用 Node.js 24 可复跑桌面和中断恢复测试。先从托盘退出日常使用的 Time-cut。在源码根目录执行 `node scripts/test_timecut_desktop.mjs <已解压的程序路径>` 和 `node scripts/test_timecut_recovery.mjs <已解压的程序路径>`。两个脚本都在项目的 `.timecut-build` 内建立独立测试目录。桌面脚本可追加一组苹果实况照片的图片和 MOV 路径来检查配对。[本次使用的公开实况样本](https://github.com/pulsejet/memories/tree/504243ba5eb07cf29770e5802ca91874e960e681/tests/assets)
+使用 Node.js 24 可复跑桌面和中断恢复测试。先从托盘退出日常使用的 Time-cut。在源码根目录执行 `node scripts/test_timecut_desktop.mjs <已解压的程序路径>` 和 `node scripts/test_timecut_recovery.mjs <已解压的程序路径>`。两个脚本都在 `.timecut-build` 内建立独立测试目录。成功后目录只留 `result.json`，失败时保留现场。需要留存成功测试的合成素材、截图与配置时，可设置 `$env:TIMECUT_QA_KEEP_FIXTURES = '1'`。桌面脚本可追加一组苹果实况照片的图片和 MOV 路径来检查配对。[公开实况样本](https://github.com/pulsejet/memories/tree/504243ba5eb07cf29770e5802ca91874e960e681/tests/assets)
 
 在已连接并授权的单台 iPhone 上，可运行 `node scripts/test_timecut_iphone.mjs <已解压的程序路径>`。它在 `.timecut-build` 中建立独立图库，复制 USB 可访问的 DCIM 相机原件及其附件，然后在同一次连接上复扫并验证去重。它会保留归档和图库索引，结果文件只记录耗时及数量。
 

@@ -8,6 +8,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { verifyOriginals } from './verify_timecut_archive.mjs';
+import { saveQaResult } from './timecut_qa_result.mjs';
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const executable = path.resolve(process.argv[2]);
@@ -132,16 +133,11 @@ try {
     partialPublished: false,
     stagingAfterRecovery: 0,
   });
-  // Keep the result and small fixtures. Release the two large disposable copies.
-  fs.unlinkSync(movie);
-  fs.unlinkSync(copied);
 } catch (error) {
   report.error = String(error.stack || error);
   console.error(error);
   process.exitCode = 1;
 } finally {
   if (child && child.exitCode === null && !child.killed) child.kill();
-  const result = path.join(test, 'result.json');
-  fs.writeFileSync(result, JSON.stringify(report, null, 2));
-  console.log(result);
+  saveQaResult(project, test, report, Boolean(report.error));
 }

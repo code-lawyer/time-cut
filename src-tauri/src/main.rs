@@ -14,6 +14,7 @@ use tauri::Manager;
 use tauri_plugin_aptabase::EventTracker;
 
 mod metadata;
+mod ingest;
 mod t_ai;
 mod t_ai_png;
 mod t_batch_rename;
@@ -40,6 +41,7 @@ mod t_migration;
 mod t_montage;
 mod t_tags;
 mod t_motion_photo;
+mod t_organize;
 mod t_pasteboard;
 mod t_protocol;
 mod t_similar;
@@ -53,12 +55,20 @@ mod t_video;
 /// The main function is the entry point for the Tauri application.
 #[tokio::main]
 async fn main() {
+    if let Some(status) = ingest::command_line() { std::process::exit(status); }
     std::panic::set_hook(Box::new(|panic_info| {
         eprintln!("Unhandled panic: {}", panic_info);
     }));
 
     let startup = t_startup::StartupState::default();
     let builder = tauri::Builder::default();
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _| {
+        if args.iter().any(|arg| matches!(arg.as_str(), "--resume-verify-phone" | "--resume-receive-phone")) {
+            ingest::wake_phone_import(app);
+        }
+        ingest::show_window(app);
+    }));
     let builder = t_protocol::register_protocols(builder);
 
     let aptabase_enabled = option_env!("APTABASE_KEY")
@@ -106,6 +116,7 @@ async fn main() {
         )))
         .manage(t_face::FaceIndexProgressState(std::sync::Arc::new(
             std::sync::Mutex::new(t_face::FaceIndexProgress {
+                library_id: String::new(),
                 current: 0,
                 total: 0,
                 faces_found: 0,
@@ -156,6 +167,10 @@ async fn main() {
             }
 
             t_startup::mark(&_app.handle(), "setup-ready");
+            ingest::start(_app.handle());
+            t_organize::start(_app.handle().clone());
+            #[cfg(windows)]
+            if let Err(e) = ingest::tray(_app.handle()) { eprintln!("Time-cut tray: {e}"); }
 
             // Open devtools in development mode
             // #[cfg(debug_assertions)] // only include this block in debug builds
@@ -186,6 +201,11 @@ async fn main() {
                 #[cfg(not(target_os = "macos"))]
                 {
                     let app_handle = window.app_handle();
+                    #[cfg(windows)]
+                    if app_handle.tray_by_id("timecut").is_some() {
+                        let _ = window.hide();
+                        return;
+                    }
 
                     // Close every other window first (image viewer, settings, ...),
                     // then exit the process.
@@ -206,6 +226,22 @@ async fn main() {
             t_menu::handle_menu_event(app, event);
         })
         .invoke_handler(tauri::generate_handler![
+            ingest::timecut_status,
+            ingest::timecut_tray_active,
+            ingest::timecut_configure,
+            ingest::timecut_set_auto,
+            ingest::timecut_folder,
+            ingest::timecut_retry,
+            ingest::timecut_indexes,
+            ingest::timecut_retry_interrupted_index,
+            ingest::timecut_indexed,
+            t_organize::timecut_scene_status,
+            t_organize::timecut_set_scene_auto,
+            t_organize::timecut_face_auto,
+            t_organize::timecut_set_scene,
+            t_organize::timecut_file_scene,
+            t_organize::agent::timecut_scene_providers,
+            t_organize::agent::timecut_suggest_scene,
             t_startup::record_startup_stage,
             t_startup::finish_startup,
             t_startup::get_ai_initialization_status,

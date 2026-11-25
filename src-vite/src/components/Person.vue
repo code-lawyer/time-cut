@@ -1,29 +1,23 @@
 <template>
-  <div class="sidebar-panel relative overflow-hidden">
-    <!-- Face Indexing Progress Overlay -->
-    <div v-if="isIndexing" 
-      class="absolute inset-0 z-50 bg-base-200/80 backdrop-blur-md"
-    >
-      <div class="mt-8 px-2 flex flex-col items-center text-base-content/30">
-        <IconUpdate class="w-8 h-8 mb-2 animate-spin" />
-        <span class="text-sm text-center">
+  <div class="sidebar-panel overflow-hidden">
+    <div v-if="isIndexing" class="face-status">
+      <div role="status" class="min-w-0">
+        <span>
           {{ indexProgress.phase === 'clustering' 
             ? $t('face_index.clustering') 
             : $t('face_index.indexing', { current: indexProgress.current.toLocaleString(), total: indexProgress.total.toLocaleString() }) 
           }}
         </span>
-        <span v-if="indexProgress.phase === 'clustering' && clusterProgressText" class="text-xs text-center mt-1">
+        <span v-if="indexProgress.phase === 'clustering' && clusterProgressText" class="block">
           {{ clusterProgressText }}
         </span>
-        <span v-else-if="indexProgress.faces_found > 0" class="text-xs text-center mt-1">
+        <span v-else-if="indexProgress.faces_found > 0" class="block">
           {{ $t('face_index.faces_found', { count: indexProgress.faces_found.toLocaleString() }) }}
         </span>
-        <button class="btn btn-primary btn-sm mt-4" @click="clickCancelIndex">
-          <IconClose class="w-4 h-4" />
-          {{ $t('face_index.cancel') }}
-        </button>
       </div>
+      <button type="button" class="btn btn-xs" @click="clickCancelIndex">{{ $t('face_index.cancel') }}</button>
     </div>
+    <p v-if="indexError && !isIndexing" role="alert" class="face-status">{{ indexError }}</p>
 
     <!-- Incomplete Indexing Warning Banner -->
     <div v-if="allPersons.length > 0 && incompleteCount > 0 && !isIndexing" class="flex-none px-2 py-2">
@@ -42,10 +36,6 @@
       <span class="sidebar-panel-header-title flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
         {{ titlebar }}<template v-if="allPersonCount > 0"> ({{ allPersonCount.toLocaleString() }})</template>
       </span>
-      <span class="px-1.5 h-5 inline-flex items-center rounded-box text-[10px] font-semibold tracking-[0.08em] text-warning border border-warning/30 bg-warning/10 cursor-default">
-        BETA
-      </span>
-
       <SortMenuButton v-model="config.settings.personSort" kind="category" />
       <ContextMenu :menuItems="personPanelMenuItems" :iconMenu="IconMore" :smallIcon="true" />
     </div>
@@ -62,15 +52,17 @@
         <input
           v-model="personSearch"
           type="text"
+          :aria-label="$t('menu.person.search')"
           :disabled="personSearchDisabled"
           :placeholder="$t('menu.person.search')"
-          class="w-full min-w-0 bg-transparent border-none focus:ring-0 px-2 text-sm placeholder-base-content/30 focus:outline-none disabled:opacity-50"
+          class="w-full min-w-0 bg-transparent border-none focus:ring-0 px-2 text-sm placeholder-base-content/80 focus:outline-none disabled:opacity-50"
           @focus="isPersonSearchFocused = true"
           @blur="isPersonSearchFocused = false"
         />
         <button
           v-if="personSearch"
           type="button"
+          :aria-label="$t('timecut.clearSearch')"
           :disabled="personSearchDisabled"
           class="mr-1 p-1 rounded-box text-base-content/30 hover:text-base-content/70 disabled:opacity-30"
           @click="personSearch = ''"
@@ -96,12 +88,11 @@
             @click="selectPerson(person)"
             @contextmenu.prevent.stop="(e: MouseEvent) => handlePersonContextMenu(person, e)"
           >
-            <!-- Face thumbnail -->
             <div class="w-8 h-8 rounded-full overflow-hidden bg-base-300/70 ring-1 ring-base-content/5 shrink-0 flex items-center justify-center">
               <img 
                 v-if="person.thumbnail" 
                 :src="'data:image/jpeg;base64,' + person.thumbnail" 
-                class="w-full h-full object-cover"
+                alt="" class="w-full h-full object-cover"
               />
               <IconPerson v-else class="w-5 h-5 text-base-content/30" />
             </div>
@@ -118,9 +109,10 @@
               @blur="handleRenamePerson"
             />
             <template v-else>
-              <span class="sidebar-item-label">
+              <button type="button" class="sidebar-item-label h-full text-start rounded focus-visible:outline-primary"
+                :aria-pressed="selectedPerson?.id === person.id" @click.stop="selectPerson(person)">
                 {{ getPersonDisplayName(person) }}
-              </span>
+              </button>
               <div class="ml-auto flex flex-row items-center text-base-content/30">
                 <span v-if="person.count" class="sidebar-item-count shrink-0">
                   {{ person.count.toLocaleString() }}
@@ -190,18 +182,6 @@
     @cancel="showResetFacesMsgbox = false"
   />
 
-  <teleport to="body">
-    <transition name="fade">
-      <div
-        v-if="isBetaTooltipVisible && config.settings.showToolTip"
-        ref="betaTooltipRef"
-        class="fixed z-1000 px-2 py-1 text-xs whitespace-nowrap rounded-box bg-neutral text-neutral-content shadow-lg pointer-events-none"
-        :style="betaTooltipStyle"
-      >
-        {{ $t('tooltip.beta.person') }}
-      </div>
-    </transition>
-  </teleport>
 </template>
 
 <script setup lang="ts">
@@ -278,10 +258,7 @@ function handlePersonContextMenu(person: any, event: MouseEvent) {
   selectPerson(person);
   personContextMenus.value[person.id]?.open?.(event.clientX, event.clientY);
 }
-const betaBadgeRef = ref<HTMLElement | null>(null);
-const betaTooltipRef = ref<HTMLElement | null>(null);
-const isBetaTooltipVisible = ref(false);
-const betaTooltipStyle = ref<Record<string, string>>({});
+const indexError = ref('');
 
 // Event listener unsubscribe functions
 let unlistenProgress: (() => void) | null = null;
@@ -361,23 +338,18 @@ onMounted(async () => {
   checkFaceStats();
   
   // Check if indexing is already running and restore progress
-  const [isRunning, progress] = await isFaceIndexing();
-  
-  if (isRunning) {
-    isIndexing.value = true;
-    if (progress) {
-      indexProgress.value = progress;
-    }
-  }
-  
   // Set up event listeners for face indexing progress
   unlistenProgress = await listenFaceIndexProgress((event: any) => {
-    isIndexing.value = true; // Show overlay when receiving progress events
+    if (event.payload.library_id !== libConfig._libraryId) return;
+    isIndexing.value = true;
+    indexError.value = '';
     indexProgress.value = event.payload;
   });
   
   unlistenFinished = await listenFaceIndexFinished((event: any) => {
+    if (event.payload.library_id !== libConfig._libraryId) return;
     isIndexing.value = false;
+    indexError.value = event.payload.error ?? '';
     indexProgress.value = { current: 0, total: 0, faces_found: 0, phase: 'indexing' };
     clusterProgress.value = { phase: '', current: 0, total: 0 };
     loadPersons(); // Reload persons after indexing completes
@@ -388,7 +360,22 @@ onMounted(async () => {
   unlistenCluster = await listenClusterProgress((event: any) => {
     clusterProgress.value = event.payload;
   });
+  if (!isPersonMounted) {
+    unlistenProgress?.();
+    unlistenFinished?.();
+    unlistenCluster?.();
+    return;
+  }
+  await restoreProgress();
 });
+
+async function restoreProgress() {
+  const library = libConfig._libraryId;
+  const [running, progress] = (await isFaceIndexing()) || [false, null];
+  if (!isPersonMounted || library !== libConfig._libraryId) return;
+  isIndexing.value = !!(running && progress?.library_id === library);
+  if (isIndexing.value) indexProgress.value = progress;
+}
 
 watch(() => config.settings.personSort, () => {
   loadPersons();
@@ -551,6 +538,7 @@ async function clickIndexFaces() {
   }
   
   isIndexing.value = true;
+  indexError.value = '';
   try {
     // Get cluster threshold from array using index
     const face = config.settings.face;
@@ -558,12 +546,9 @@ async function clickIndexFaces() {
     // Use getter for thresholds to ensure we get the latest values, even if state is old
     const thresholds = config.faceClusterThresholds ?? [0.35, 0.45, 0.55, 0.65];
     const clusterEpsilon = thresholds[thresholdIndex] ?? 0.55;
-    console.log('clusterEpsilon', clusterEpsilon);
     await indexFaces(clusterEpsilon);
-    await loadPersons();
-    await checkFaceStats();
   } catch (e) {
-    console.error('indexFaces error:', e);
+    indexError.value = String(e);
     isIndexing.value = false;
   }
 }
@@ -580,6 +565,10 @@ async function clickResetFaces() {
 
 async function onResetFacesConfirm() {
   showResetFacesMsgbox.value = false;
+  if (!await resetFaces()) {
+    indexError.value = t('face_index.reset_failed');
+    return;
+  }
   
   // Reset selection and config
   selectedPerson.value = null;
@@ -588,7 +577,6 @@ async function onResetFacesConfirm() {
     libConfig.person.name = null;
   }
 
-  await resetFaces();
   if (personSearch.value) {
     personSearch.value = '';
     await nextTick();
@@ -601,13 +589,16 @@ async function onResetFacesConfirm() {
 }
 
 async function checkFaceStats() {
+  const library = libConfig._libraryId;
   const stats = await getFaceStats();
-  if (stats) {
+  if (isPersonMounted && library === libConfig._libraryId && stats) {
     incompleteCount.value = stats.unprocessed;
   }
 }
 
 useLibraryChangeRefresh(() => {
+  indexError.value = '';
+  void restoreProgress();
   void loadPersons(true, true);
   void checkFaceStats();
 });
@@ -621,41 +612,6 @@ watch(() => [config.main.sidebarIndex, libConfig.activePane], () => {
   }
 });
 
-async function showBetaTooltip() {
-  if (!config.settings.showToolTip || !betaBadgeRef.value) return;
-
-  isBetaTooltipVisible.value = true;
-  await nextTick();
-
-  if (!betaBadgeRef.value || !betaTooltipRef.value) return;
-
-  const rect = betaBadgeRef.value.getBoundingClientRect();
-  const tooltipRect = betaTooltipRef.value.getBoundingClientRect();
-  const padding = 4;
-
-  let top = rect.bottom + padding;
-  let left = rect.left + (rect.width - tooltipRect.width) / 2;
-
-  if (left + tooltipRect.width > window.innerWidth - padding) {
-    left = window.innerWidth - tooltipRect.width - padding;
-  }
-  if (left < padding) {
-    left = padding;
-  }
-  if (top + tooltipRect.height > window.innerHeight - padding) {
-    top = rect.top - tooltipRect.height - padding;
-  }
-
-  betaTooltipStyle.value = {
-    top: `${top}px`,
-    left: `${left}px`,
-  };
-}
-
-function hideBetaTooltip() {
-  isBetaTooltipVisible.value = false;
-}
-
 defineExpose({
   clickIndexFaces,
   clickCancelIndex,
@@ -665,3 +621,7 @@ defineExpose({
 });
 
 </script>
+
+<style scoped>
+.face-status { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin: .25rem .5rem; padding: .5rem; border-radius: var(--radius-box); background: var(--color-base-200); font-size: .75rem; line-height: 1.45; overflow-wrap: anywhere; }
+</style>

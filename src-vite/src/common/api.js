@@ -1958,18 +1958,15 @@ export async function searchSimilarImages(params) {
 // indexing
 
 // index album
-export async function indexAlbum(albumId, skipFilePath = null) {
-  try {
-    await invoke('index_album', {
-      albumId,
-      thumbnailSize: config.settings.thumbnailSize || 512,
-      rawDisplayOptions: getRawDisplayOptions(),
-      skipFilePath,
-      groupRawJpegPairs: Boolean(config.settings.groupRawJpegPairs),
-    });
-  } catch (error) {
-    console.error('indexAlbum error:', error);
-  }
+export function indexAlbum(albumId, skipFilePath = null, expectedLibrary = null) {
+  return invoke('index_album', {
+    albumId,
+    expectedLibrary,
+    thumbnailSize: config.settings.thumbnailSize || 512,
+    rawDisplayOptions: getRawDisplayOptions(),
+    skipFilePath,
+    groupRawJpegPairs: Boolean(config.settings.groupRawJpegPairs),
+  });
 }
 
 // cancel indexing
@@ -1998,6 +1995,15 @@ export async function clearIndexRecoveryInfo() {
     console.error('Failed to clear index recovery info:', error);
   }
   return false;
+}
+
+export async function retryInterruptedImportIndex(library, album) {
+  try {
+    return await invoke('timecut_retry_interrupted_index', { library, album });
+  } catch (error) {
+    console.error('Could not check the local import recovery record', error);
+    return false;
+  }
 }
 
 // listen index progress
@@ -2127,13 +2133,7 @@ export async function listenIndexFinished(callback) {
 
 // index faces for all images in library
 export async function indexFaces(clusterEpsilon) {
-  try {
-    const result = await invoke('index_faces', { clusterEpsilon });
-    return result;
-  } catch (error) {
-    console.error('Failed to index faces:', error);
-  }
-  return null;
+  return invoke('index_faces', { clusterEpsilon });
 }
 
 // cancel face indexing

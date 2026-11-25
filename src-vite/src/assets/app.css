@@ -105,7 +105,7 @@ select option {
 
 /* sidebar panel header */
 @utility sidebar-panel-header {
-  @apply px-2 h-10 flex items-center justify-between gap-1 whitespace-nowrap shrink-0 text-base-content/30;
+  @apply px-2 h-10 flex items-center justify-between gap-1 whitespace-nowrap shrink-0 text-base-content/80;
 }
 
 @utility sidebar-panel-header-title {
@@ -138,7 +138,8 @@ select option {
 }
 
 @utility sidebar-item-selected {
-  @apply text-primary bg-base-100 hover:bg-base-100;
+  @apply text-base-content font-semibold;
+  background-color: color-mix(in srgb, var(--color-primary) 9%, var(--color-base-100));
 }
 
 .sidebar-pane-inactive .sidebar-item-selected,
@@ -159,7 +160,7 @@ select option {
 }
 
 @utility sidebar-item-count {
-  @apply badge badge-xs tabular-nums border-0 bg-base-100/30 text-base-content/30;
+  @apply badge badge-xs tabular-nums border-0 bg-base-100/30 text-base-content/80;
 }
 
 @utility album-tree-chevron {
@@ -172,7 +173,7 @@ select option {
 
 /* sidebar empty state */
 @utility sidebar-empty {
-  @apply mt-2 mb-4 px-2 flex flex-col items-center justify-center text-base-content/30;
+  @apply mt-2 mb-4 px-2 flex flex-col items-center justify-center text-base-content/80;
 }
 
 /* Thumbnail and viewer badges share the per-file More button surface. */

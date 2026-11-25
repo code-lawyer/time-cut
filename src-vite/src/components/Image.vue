@@ -887,10 +887,12 @@ function warmImage(filePath?: string) {
     warmImageTimeout = null;
     if (props.nextFilePath !== filePath || filePath === props.filePath) return;
 
-    const runWarmup = () => {
+    const runWarmup = async () => {
       warmImageIdleId = null;
-      if (props.nextFilePath !== filePath || filePath === props.filePath) return;
-
+      if (request !== warmImageRequest || props.nextFilePath !== filePath || filePath === props.filePath) return;
+      // Reading a cloud placeholder downloads it. Navigation may change while Windows
+      // is checking the neighboring file's attributes.
+      if (await isCloudOnlyFile(filePath)) return;
       if (request !== warmImageRequest || props.nextFilePath !== filePath || filePath === props.filePath) return;
       void loadImageResource(filePath).catch(() => {
         // Ignore preload failures and let the main load path surface errors.

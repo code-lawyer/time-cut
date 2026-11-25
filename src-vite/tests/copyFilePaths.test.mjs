@@ -41,10 +41,10 @@ test('RAW clipboard paths follow the grouping switch', async () => {
 
 test('clipboard copy reaches policy validation even when the RAW primary is unavailable', () => {
   const source = readFileSync(new URL('../src/common/availability.ts', import.meta.url), 'utf8');
-  const functions = source.slice(source.indexOf('const originalActions ='))
-    .replace('export function requiresOriginalAction', 'function requiresOriginalAction');
-  const requiresOriginal = new Function(ts.transpile(functions, {target: ts.ScriptTarget.ES2022})
-    + ';return requiresOriginalAction;')();
+  const functions = source.slice(source.indexOf('const originalActions ='));
+  const loaded = {};
+  new Function('exports', ts.transpile(functions, {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS}))(loaded);
+  const requiresOriginal = loaded.requiresOriginalAction;
   assert.equal(requiresOriginal('copy'), false);
   for (const action of ['move-within-library', 'move-to-folder', 'copy-to-folder', 'trash', 'rename']) {
     assert.equal(requiresOriginal(action), true);

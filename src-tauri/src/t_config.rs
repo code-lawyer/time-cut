@@ -440,6 +440,11 @@ impl Default for AppConfig {
 
 /// Get the AppData directory for app
 pub fn get_app_data_dir() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("TIMECUT_DATA_DIR") {
+        let path = PathBuf::from(path);
+        if path.is_absolute() { return Ok(path); }
+        return Err("TIMECUT_DATA_DIR must be an absolute path".into());
+    }
     let app_dir_name = get_app_data_folder_name();
     dirs::data_local_dir()
         .ok_or_else(|| "Failed to get the local AppData directory".to_string())
@@ -464,6 +469,9 @@ fn get_app_data_folder_name() -> String {
 /// windows: C:\Users\<username>\AppData\Local\com.julyx10.lap\cache
 /// linux: ~/.cache/com.julyx10.lap
 pub fn get_app_cache_dir() -> Result<PathBuf, String> {
+    if cfg!(windows) || std::env::var_os("TIMECUT_DATA_DIR").is_some() {
+        return get_app_data_dir().map(|p| p.join("cache"));
+    }
     let app_dir_name = get_app_data_folder_name();
     dirs::cache_dir()
         .ok_or_else(|| "Failed to get the local cache directory".to_string())

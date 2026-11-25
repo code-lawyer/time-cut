@@ -3,7 +3,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Lap",
+        "title": "Time-cut",
         "width": 1200,
         "height": 800,
         "minWidth": 800,
@@ -26,7 +26,6 @@
       }
     },
     "resources": {
-      "resources/models/*": "models",
       "resources/ffmpeg/*": "ffmpeg"
     }
   }

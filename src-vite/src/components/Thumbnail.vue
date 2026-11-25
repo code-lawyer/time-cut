@@ -210,10 +210,7 @@
     <div 
       v-if="config.settings.grid.style === 0" 
       class="flex flex-col items-center" 
-      :class="{ 
-        'text-primary': isSelected && isContentActive,
-        'text-primary/50': isSelected && !isContentActive,
-      }"
+      :class="isSelected ? 'text-base-content font-medium' : 'text-base-content/90'"
       :style="{ width: layoutStyle.width }"
     >
       <span 
@@ -223,7 +220,7 @@
         {{ getGridLabelText(file, config.settings.grid.labelPrimary) }}
       </span>
       <span 
-        class="w-full text-xs text-center whitespace-pre text-nowrap text-ellipsis overflow-hidden"
+        class="w-full text-xs font-normal text-base-content/75 text-center whitespace-pre text-nowrap text-ellipsis overflow-hidden"
         :title="getGridLabelTooltip(file, config.settings.grid.labelSecondary)"
       >
         {{ getGridLabelText(file, config.settings.grid.labelSecondary) }}
@@ -498,10 +495,10 @@ function startAnimatedImagePreview() {
 
   const request = ++animatedImagePreviewRequest;
   const filePath = props.file?.file_path || '';
-  animatedImagePreviewTimer = setTimeout(() => {
+  animatedImagePreviewTimer = setTimeout(async () => {
     animatedImagePreviewTimer = null;
-    if (!canPreviewAnimatedImage.value) return;
     // The catalog flag can be stale; loading an online-only image would download it.
+    if (!canPreviewAnimatedImage.value || await isCloudOnlyFile(filePath)) return;
     if (request !== animatedImagePreviewRequest || props.file?.file_path !== filePath
       || !canPreviewAnimatedImage.value) return;
     isAnimatedImagePreviewReady.value = false;

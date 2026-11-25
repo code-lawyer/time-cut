@@ -214,7 +214,7 @@ export const useConfigStore = defineStore('configStore', {
       
       // face recognition settings
       face: {
-        enabled: false, // enable face recognition in image search
+        enabled: true,
         // Cluster threshold index: 0=Very High, 1=High, 2=Medium, 3=Low
         clusterThresholdIndex: 2, // Default: Medium
       },

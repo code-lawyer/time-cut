@@ -25,8 +25,9 @@
           ref="searchInputRef"
           type="text"
           v-model="search"
+          :aria-label="$t('menu.location.search')"
           :placeholder="$t('menu.location.search')"
-          class="w-full min-w-0 bg-transparent border-none focus:ring-0 px-2 text-sm placeholder-base-content/30 focus:outline-none"
+          class="w-full min-w-0 bg-transparent border-none focus:ring-0 px-2 text-sm placeholder-base-content/80 focus:outline-none"
           maxlength="255"
           @focus="isSearchFocused = true"
           @blur="isSearchFocused = false"
@@ -34,6 +35,7 @@
         <button
           v-if="search"
           type="button"
+          :aria-label="$t('timecut.clearSearch')"
           class="mr-1 p-1 rounded-box text-base-content/30 hover:text-base-content/70"
           @click.stop="search = ''; searchInputRef?.focus()"
         >
@@ -45,37 +47,38 @@
     <!-- list view -->
     <div v-if="sortedLocations.length > 0" class="flex-1 overflow-x-hidden overflow-y-auto">
       <ul>
-        <li v-for="location in sortedLocations">
+        <li v-for="location in sortedLocations" :key="location.cc + '/' + location.admin1">
           <div
             :class="[
               'sidebar-item',
-              libConfig.location.admin1 === location.admin1 && !libConfig.location.name ? 'sidebar-item-selected' : 'sidebar-item-hover',
+              regionSelected(location) && !libConfig.location.name ? 'sidebar-item-selected' : 'sidebar-item-hover',
             ]"
-            @click="clickLocationAdmin1(location)"
           >
-            <IconRight
-              :class="[
-                'p-1 w-6 h-6 shrink-0 transition-transform',
-                (location.is_expanded || hasSearch) ? 'rotate-90' : ''
-              ]"
-              @click.stop="clickExpandLocation(location)"
-            />
-            <span class="sidebar-item-label">{{ location.admin1 + (location.cc ? ', ' + getCountryName(location.cc, locale) : '') }}</span>
-            <span class="sidebar-item-count">{{ location.counts.reduce((a: number, b: number) => a + b, 0).toLocaleString() }}</span>
+            <button type="button" class="p-1 shrink-0 rounded focus-visible:outline-primary"
+              :aria-label="location.admin1" :aria-expanded="location.is_expanded || hasSearch"
+              @click="clickExpandLocation(location)">
+              <IconRight :class="['w-4 h-4 transition-transform', (location.is_expanded || hasSearch) ? 'rotate-90' : '']" />
+            </button>
+            <button type="button" class="flex flex-1 min-w-0 h-full items-center text-start rounded focus-visible:outline-primary"
+              :aria-pressed="regionSelected(location) && !libConfig.location.name" @click="clickLocationAdmin1(location)">
+              <span class="sidebar-item-label">{{ location.admin1 + (location.cc ? ', ' + getCountryName(location.cc, locale) : '') }}</span>
+              <span class="sidebar-item-count">{{ location.counts.reduce((a: number, b: number) => a + b, 0).toLocaleString() }}</span>
+            </button>
           </div>
           <ul v-if="(location.is_expanded || hasSearch) && location.names.length > 0">
-            <li v-for="(name, index) in location.names" class="pl-4">
-              <div
+            <li v-for="(name, index) in location.names" :key="name" class="pl-4">
+              <button type="button"
                 :class="[
-                  'sidebar-item sidebar-item-compact ml-2',
-                  libConfig.location.name === name ? 'sidebar-item-selected' : 'sidebar-item-hover',
+                  'sidebar-item sidebar-item-compact ml-2 w-[calc(100%_-_1rem)] text-start focus-visible:outline-primary',
+                  regionSelected(location) && libConfig.location.name === name ? 'sidebar-item-selected' : 'sidebar-item-hover',
                 ]"
+                :aria-pressed="regionSelected(location) && libConfig.location.name === name"
                 @click="clickLocationName(location, name)"
               >
                 <IconLocation class="mx-1 w-4 h-4 shrink-0" />
                 <span class="sidebar-item-label">{{ name }}</span>
                 <span class="sidebar-item-count">{{ location.counts[index].toLocaleString() }}</span>
-              </div>
+              </button>
             </li>
           </ul>
         </li>
@@ -110,8 +113,7 @@ const props = defineProps({
   }
 });
 
-const { locale, messages } = useI18n(); // get locale for country name translation
-const localeMsg = computed(() => messages.value[locale.value] as any);
+const { locale } = useI18n();
 
 const locations = ref<any[]>([]);
 const isLoadingLocations = ref(true);
@@ -167,8 +169,10 @@ onMounted(async () => {
       (libConfig.location as any).name = null;
     }
     
-    if(libConfig.location.cc && libConfig.location.admin1 && libConfig.location.name) {
-      let location = locations.value.find((location: any) => location.admin1 === libConfig.location.admin1)
+    if (!libConfig.location.admin1 && locations.value.length > 0) {
+      clickLocationAdmin1(locations.value[0]);
+    } else if(libConfig.location.cc && libConfig.location.admin1 && libConfig.location.name) {
+      const location = locations.value.find(regionSelected);
       if(location) {
         location.is_expanded = true;     // expand selected location
       } else {
@@ -195,12 +199,14 @@ watch(() => [config.main.sidebarIndex, libConfig.activePane], async () => {
   if (libConfig.activePane === 'main' && config.main.sidebarIndex === SIDEBAR.LOCATION) await getLocations();
 });
 
+function regionSelected(location: { cc: string; admin1: string }) {
+  return location.admin1 === libConfig.location.admin1 && location.cc === (libConfig.location.cc ?? '');
+}
+
 function restoreLocationSelection() {
   if (!libConfig.location.admin1) return;
 
-  const location = locations.value.find((item: any) =>
-    item.admin1 === libConfig.location.admin1 && item.cc === (libConfig.location.cc || '')
-  );
+  const location = locations.value.find(regionSelected);
 
   if (!location) {
     (libConfig.location as any).cc = null;

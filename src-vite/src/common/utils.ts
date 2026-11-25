@@ -227,13 +227,15 @@ export function getMediaItemSize(file: { size?: number | null; companion_size?: 
 
 /// format file size to string
 export function formatFileSize(bytes: number): string {
-  if (bytes == null) return '';
-  if (bytes === 0) return '0 KB';
-
-  const sizes = ['KB', 'MB', 'GB', 'TB'];
-  const i = Math.max(Math.floor(Math.log(bytes) / Math.log(1024)) - 1, 0);
-  const fileSize = bytes / Math.pow(1024, i + 1);
-  return i === 0 ? `${fileSize.toFixed(0)} ${sizes[i]}` : `${fileSize.toFixed(2)} ${sizes[i]}`;
+  if (!Number.isFinite(bytes) || bytes < 0) return '';
+  const units = ['B', 'kB', 'MB', 'GB', 'TB', 'PB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000;
+    unit++;
+  }
+  return `${unit ? value.toFixed(2) : Math.round(value)} ${units[unit]}`;
 }
 
 /// format dimension text (width x height - pixel count)

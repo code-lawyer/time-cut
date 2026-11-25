@@ -11,7 +11,9 @@
     </transition>
 
     <!-- Title Bar -->
-    <TitleBar v-if="showDesktopTitleBar" titlebar="Lap" viewName="Home" :icon="iconLogo"/>
+    <TitleBar v-if="showDesktopTitleBar" titlebar="Time-cut" viewName="Home" :icon="iconLogo">
+      <TimecutImport v-if="isWin" />
+    </TitleBar>
 
     <!-- Main Content -->
     <div class="flex-1 flex overflow-hidden">
@@ -36,12 +38,13 @@
           ></div>
 
           <!-- side bar -->
-          <div 
-            class="fixed top-14 min-w-16 bottom-10 z-10 flex flex-col items-center space-y-1" 
-            data-tauri-drag-region
+          <nav
+            class="fixed top-14 min-w-16 bottom-10 z-10 flex flex-col items-center gap-1"
+            :aria-label="$t('sidebar.library')"
           >
-            <div v-for="item in visibleButtons" :key="item.index">
+            <div class="sidebar-navigation">
               <TButton
+                v-for="item in visibleButtons" :key="item.index" :data-sidebar="item.index"
                 :buttonSize="'large'"
                 :icon="item.icon"
                 text=""
@@ -53,10 +56,8 @@
               />
             </div>
 
-            <div class="flex-1"></div>
-
             <TButton 
-              class="mt-auto"
+              class="shrink-0"
               :class="showDebugBadge ? 'text-warning': ''"
               :buttonSize="'large'" 
               :icon="IconSettings" 
@@ -65,7 +66,7 @@
               tooltipPlacement="right"
               @click="clickSettings"
             />
-          </div>
+          </nav>
 
           <!-- library title -->
           <div
@@ -206,9 +207,11 @@ const Tag = defineAsyncComponent(() => import('@/components/Tag.vue'));
 const Calendar = defineAsyncComponent(() => import('@/components/Calendar.vue'));
 const Location = defineAsyncComponent(() => import('@/components/Location.vue'));
 const Person = defineAsyncComponent(() => import('@/components/Person.vue'));
+const ScenePanel = defineAsyncComponent(() => import('@/components/ScenePanel.vue'));
 const Camera = defineAsyncComponent(() => import('@/components/Camera.vue'));
 
 import TitleBar from '@/components/TitleBar.vue';
+import TimecutImport from '@/components/TimecutImport.vue';
 import TButton from '@/components/TButton.vue';
 import Content from '@/components/Content.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
@@ -228,7 +231,8 @@ import {
   IconArrowDown,
   IconCalendarDay,
   IconFolders,
-  IconFolderCog
+  IconFolderCog,
+  IconCollection,
 } from '@/common/icons';
 
 const isSwitchingLibrary = ref(false);
@@ -266,7 +270,7 @@ const checkLibraryEmpty = async () => {
 };
 
 /// i18n
-const { locale, messages } = useI18n();
+const { locale, messages, t } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 
 const uiStore = useUIStore();
@@ -387,6 +391,7 @@ const buttons = computed(() =>  [
   { index: SIDEBAR.PERSON, icon: IconPerson, component: Person, text: localeMsg.value.sidebar.people, hidden: !config.settings.face.enabled },
   { index: SIDEBAR.LOCATION, icon: IconLocation, component: Location, text: localeMsg.value.sidebar.location },
   { index: SIDEBAR.CAMERA, icon: IconCamera, component: Camera, text: localeMsg.value.sidebar.camera },
+  { index: SIDEBAR.SCENE, icon: IconCollection, component: ScenePanel, text: t('scene.title') },
 ]);
 
 const activeSidebarButton = computed(() =>
@@ -405,6 +410,7 @@ const visibleButtons = computed(() =>
 );
 
 watch(() => config.settings.face.enabled, (enabled) => {
+  void invoke('timecut_face_auto', { enabled: !!enabled }).catch(console.error);
   if (!enabled && config.main.sidebarIndex === SIDEBAR.PERSON) {
     config.main.sidebarIndex = SIDEBAR.ALBUM;
   }
@@ -496,6 +502,7 @@ onMounted(async () => {
   });
 
   appConfig.value = await getAppConfig();
+  void invoke('timecut_face_auto', { enabled: !!config.settings.face.enabled }).catch(console.error);
 
   void checkLibraryEmpty();
 
@@ -819,3 +826,8 @@ function getSettingsWindowScale() {
 }
 
 </script>
+
+<style scoped>
+.sidebar-navigation { display: flex; flex: 1; flex-direction: column; align-items: center; gap: .25rem; min-height: 0; width: 100%; overflow-y: auto; scrollbar-width: thin; }
+.sidebar-navigation > * { flex: none; }
+</style>

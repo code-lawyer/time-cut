@@ -1,15 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
+import { readTestSource } from './readSource.mjs';
 import ts from 'typescript';
 import { computed, markRaw, reactive, ref } from 'vue';
 
 function moduleBody(path) {
-  const source = fs.readFileSync(new URL(path, import.meta.url), 'utf8');
+  const source = readTestSource(path);
   return ts.transpile(source.replace(/^import[\s\S]*?from ['"][^'"]+['"];?\n/gm, '').replace(/export /g, ''), { target: ts.ScriptTarget.ES2022 });
 }
 const libConfig = { _libraryId: 'offline-test', album: { id: 1 }, activePane: 'album' };
-const clipboardUtils = fs.readFileSync(new URL('../src/common/utils.ts', import.meta.url), 'utf8');
+const clipboardUtils = readTestSource('../src/common/utils.ts');
 const getClipboardItemPaths = new Function(
   ts.transpile(clipboardUtils.slice(
     clipboardUtils.indexOf('export function getClipboardItemPaths'),
@@ -40,7 +40,7 @@ test('offline state does not remove catalog data and follows reconnection, indiv
   assert.equal(isOriginalUnavailable(file), false);
 });
 
-const source = fs.readFileSync(new URL('../src/common/fileMenu.ts', import.meta.url), 'utf8');
+const source = readTestSource('../src/common/fileMenu.ts');
 const iconNames = source.match(/import \{([^}]+)\} from '@\/common\/icons'/)[1].split(',').map(s => s.trim()).filter(Boolean);
 const config = { main: { sidebarIndex: 1 }, settings: { face: { enabled: true } }, externalAppsFor: () => [{ id: 'editor', name: 'Editor' }], defaultExternalApp: () => null };
 const useFileMenuItems = new Function('computed', 'markRaw', 'config', 'libConfig', 'SIDEBAR', 'DEFAULT_PLATFORM', 'getShortcutLabel', 'isOriginalStorageUnavailable', 'isOriginalUnavailable', 'requiresOriginalAction', 'requiresLocalContent', 'isPreviewOnlyDocument', 'isWin', ...iconNames, moduleBody('../src/common/fileMenu.ts') + '; return useFileMenuItems;')(
@@ -51,7 +51,7 @@ const locale = ref({ menu: { file: words(), meta: words() }, rating: words(), cu
 const allItems = items => items.flatMap(item => [item, ...allItems(item.children || [])]);
 const action = (items, name) => allItems(items).find(item => item.action?.actionName === name);
 
-test('single-file menu retains catalog organization and blocks original-file operations while offline', () => {
+test('single-file menu and metadata controls retain catalog organization while original-file operations are offline', async () => {
   const file = ref({ id: 42, album_id: 1, album_accessible: false, file_type: 1, has_embedding: true, file_path: '/photos/offline.jpg' });
   setAlbumAccessibility(1, false);
   const called = [];
@@ -61,11 +61,31 @@ test('single-file menu retains catalog organization and blocks original-file ope
     action(menu.value, name).action();
   }
   assert.deepEqual(called, []);
-  for (const name of ['favorite', 'rating-5', 'tag', 'comment', 'add-to-collection', 'rotate', 'open', 'set-album-cover']) {
+  for (const name of ['favorite', 'rating-5', 'tag', 'add-to-collection', 'open', 'set-album-cover']) {
     assert.equal(action(menu.value, name).disabled, false, name);
     action(menu.value, name).action();
   }
   assert.ok(called.includes('tag'));
+
+  // Comment and orientation now live in the metadata and viewer controls.
+  const controls = {
+    selectMode: ref(false), selectedItemIndex: ref(0), fileList: ref([file.value]),
+    config: { infoPanel: { fields: ['comments'] } }, getVisibleEditableMetadataFields: () => ['comments'],
+    showCommentMsgbox: ref(false), metadataFiles: ref([]), metadataFocus: ref(''),
+    syncFileMetaToImageViewer() {}, tauriEmit() {}, refreshFileGeometryLayout() {},
+    setFileRotate(id, rotate) { called.push([id, rotate]); },
+  };
+  const actions = new Function(...Object.keys(controls),
+    extractFunction(contentSource, 'const rotateSelected =', '// set file tag') +
+    extractFunction(contentSource, 'function onMetadataSaved(', 'const selectAllInCurrentList =') +
+    ';return { rotateSelected, openCommentEditor, onMetadataSaved };')(...Object.values(controls));
+  await actions.openCommentEditor(true);
+  assert.equal(controls.showCommentMsgbox.value, true);
+  assert.equal(controls.metadataFocus.value, 'comments');
+  actions.onMetadataSaved(controls.metadataFiles.value, { comments: 'offline edit' });
+  assert.equal(file.value.comments, 'offline edit');
+  await actions.rotateSelected(90, true);
+  assert.deepEqual(called.at(-1), [42, 90]);
 
   setAlbumAccessibility(1, true);
   assert.equal(action(menu.value, 'copy').disabled, false);
@@ -106,7 +126,7 @@ test('mixed availability blocks the entire selection rather than silently skippi
   const unavailable = ref(true);
   const storageUnavailable = ref(true);
   const menu = useFileMenuItems(ref(null), locale, true, key => key, () => {}, {
-    selectMode: ref(true), selectionMediaKind: ref('image'), selectionCount: ref(3), selectionHasUnavailable: unavailable, selectionStorageUnavailable: storageUnavailable,
+    selectMode: ref(true), selectionMediaKind: ref('image'), selectionCount: ref(3), selectionHasUnavailable: unavailable, selectionStorageUnavailable: storageUnavailable, selectionHasCloudOnly: ref(false),
   });
   assert.equal(action(menu.value, 'refresh-file-info').disabled, true);
   assert.equal(action(menu.value, 'create-montage').disabled, true);
@@ -121,7 +141,7 @@ test('mixed availability blocks the entire selection rather than silently skippi
   assert.equal(action(menu.value, 'copy').disabled, false);
 });
 
-const imageSource = fs.readFileSync(new URL('../src/components/Image.vue', import.meta.url), 'utf8');
+const imageSource = readTestSource('../src/components/Image.vue');
 const fallbackBody = ts.transpile(imageSource.slice(imageSource.indexOf('async function showOfflinePreview'), imageSource.indexOf('// Watch file changes and the selected RAW preview source.')), { target: ts.ScriptTarget.ES2022 });
 function previewFixture({ backend = false, thumbnail = true } = {}) {
   const deps = {
@@ -180,7 +200,7 @@ test('a delayed offline preview cannot replace a more recently selected file', a
   assert.equal(fixture.deps.offlinePreview.value, false);
 });
 
-const contentSource = fs.readFileSync(new URL('../src/components/Content.vue', import.meta.url), 'utf8');
+const contentSource = readTestSource('../src/components/Content.vue');
 const dragBody = ts.transpile(contentSource.slice(contentSource.indexOf('function markContentInternalDrag('), contentSource.indexOf('const isProcessing = ref(false);')), { target: ts.ScriptTarget.ES2022 });
 function dragFixture(collection = false) {
   const files = [
@@ -233,7 +253,7 @@ test('offline files can still be dragged into a collection without original-file
   assert.deepEqual(fixture.calls.preflight, []);
 });
 
-const dedupSource = fs.readFileSync(new URL('../src/components/DedupPane.vue', import.meta.url), 'utf8');
+const dedupSource = readTestSource('../src/components/DedupPane.vue');
 function extractFunction(source, name, next) {
   return ts.transpile(source.slice(source.indexOf(name), source.indexOf(next, source.indexOf(name))), { target: ts.ScriptTarget.ES2022 });
 }
@@ -333,7 +353,7 @@ test('selection context menu resolves unloaded clipboard candidates before displ
 });
 
 test('image viewer copy action follows RAW grouping for the active file', async () => {
-  const viewer = fs.readFileSync(new URL('../src/views/ImageViewer.vue', import.meta.url), 'utf8');
+  const viewer = readTestSource('../src/views/ImageViewer.vue');
   const calls = [];
   const file = { file_path: '/photos/active.nef', live_photo_video_path: '/photos/active.jpg', media_subtype: 'raw_jpeg_pair' };
   const deps = {
@@ -452,7 +472,7 @@ test('trash confirmation dispatches file-plan and dedup handlers', async () => {
 });
 
 test('independent preview updates all visible panes on album recovery and ignores another library', async () => {
-  const viewer = fs.readFileSync(new URL('../src/views/ImageViewer.vue', import.meta.url), 'utf8');
+  const viewer = readTestSource('../src/views/ImageViewer.vue');
   const start = viewer.indexOf("async (event: any) => {", viewer.indexOf("listen('album-accessibility-changed'"));
   const handler = viewer.slice(start, viewer.indexOf('\n  });', start));
   const left = ref({ id: 1, album_id: 1, album_accessible: false });
@@ -484,7 +504,7 @@ test('library reload clears stale album, folder and file availability when retur
   setFileAccessibility(file.file_path, false);
   setFolderAccessibility('/returning/sub', false);
   assert.equal(isOriginalUnavailable(file), true);
-  const store = fs.readFileSync(new URL('../src/stores/libraryStore.js', import.meta.url), 'utf8');
+  const store = readTestSource('../src/stores/libraryStore.js');
   const start = store.indexOf('async reload() {');
   const reload = new Function('resetLibraryAccessibility', 'return ({' +
     store.slice(start, store.indexOf('\n    },', start) + 6) + '}).reload;')(resetLibraryAccessibility);
@@ -515,9 +535,11 @@ test('album recovery preserves similar pagination and selection while refreshing
   const groups = ref([{ id: 50, items: [{ file: { id: 99, album_id: 1, album_accessible: false } }] }]);
   const selected = ref(50);
   const calls = [];
+  let candidatesChanged = 0;
   const deps = {
     libConfig, rawGroups: ref([]), similarGroups: groups, activeTab: ref('similar'),
     selectedSimilarGroupId: selected, selectedGroupId: ref(1),
+    markSimilarCandidatesChanged: () => { candidatesChanged++; },
     hydrateSimilarThumbnails: async (list, id) => calls.push([list, id]),
     hydrateGroupThumbnails: () => { throw new Error('Inactive panel must not be reloaded'); },
   };
@@ -528,6 +550,7 @@ test('album recovery preserves similar pagination and selection while refreshing
   assert.equal(selected.value, 50);
   assert.equal(groups.value[0].items[0].file.album_accessible, true);
   assert.equal(calls[0][1], 50);
+  assert.equal(candidatesChanged, 1);
 });
 
 test('rechecking one album preserves unavailable state in unrelated albums', () => {
@@ -582,12 +605,22 @@ test('oversized drag selection skips native preview and hydration while keeping 
 });
 
 
-test('cloud indexing menu falls back to English when the locale has no new label', () => {
-  const menu = useFileMenuItems(ref(null), ref({ menu: { file: {}, meta: {} }, rating: words(), culling: words() }), true, key => key, () => {}, {
+test('cloud placeholders allow explicit metadata refresh and retain a readable fallback for unavailable local actions', () => {
+  const english = JSON.parse(readTestSource('../src/locales/en.json'));
+  const menuLocale = ref({ menu: { file: { refresh_file_info: english.menu.file.refresh_file_info }, meta: {} }, rating: words(), culling: words() });
+  const invoked = [];
+  const menu = useFileMenuItems(ref(null), menuLocale, true, key => key, name => invoked.push(name), {
     selectMode: ref(true), selectionCount: ref(1), selectionHasCloudOnly: ref(true),
   });
-  assert.equal(action(menu.value, 'index-cloud-files').label, 'Download, index, then free up space');
-  assert.equal(action(menu.value, 'index-cloud-files').disabled, false);
+  const refresh = action(menu.value, 'refresh-file-info');
+  assert.equal(refresh.label, 'Refresh file info');
+  assert.equal(refresh.disabled, false);
+  refresh.action();
+  const montage = action(menu.value, 'create-montage');
+  assert.equal(montage.label, 'Create montage...');
+  assert.equal(montage.disabled, true);
+  montage.action();
+  assert.deepEqual(invoked, ['refresh-file-info']);
 });
 
 const warmupBody = ts.transpile(imageSource.slice(imageSource.indexOf('let warmImageRequest ='), imageSource.indexOf('function clearStalePreloadEntries')), { target: ts.ScriptTarget.ES2022 });

@@ -1,7 +1,7 @@
 {
-  "productName": "Lap",
-  "version": "0.4.1",
-  "identifier": "com.julyx10.lap",
+  "productName": "Time-cut",
+  "version": "0.1.0-preview.36",
+  "identifier": "app.timecut.album",
   "build": {
     "beforeBuildCommand": "pnpm --dir ../src-vite build",
     "beforeDevCommand": "pnpm --dir ../src-vite dev",
@@ -54,23 +54,27 @@
     "active": true,
     "category": "Graphics and Design",
     "targets": "all",
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "icon": [
       "icons/icon.png",
       "icons/icon.ico",
       "icons/icon.icns"
     ],
     "resources": {
-      "resources/models/*": "models",
+      "resources/models/text_model.onnx": "models/text_model.onnx",
+      "resources/models/vision_model.onnx": "models/vision_model.onnx",
+      "resources/models/tokenizer.json": "models/tokenizer.json",
+      "resources/models/face_detection_yunet_2026may.onnx": "models/face_detection_yunet_2026may.onnx",
+      "resources/models/face_recognition_sface_2021dec.onnx": "models/face_recognition_sface_2021dec.onnx",
+      "resources/models/YuNet-LICENSE.txt": "licenses/YuNet-LICENSE.txt",
+      "resources/models/SFace-LICENSE.txt": "licenses/SFace-LICENSE.txt",
       "resources/ffmpeg/*": "ffmpeg",
       "../THIRD_PARTY_NOTICES.txt": "licenses/THIRD_PARTY_NOTICES.txt"
     }
   },
   "plugins": {
     "updater": {
-      "endpoints": [
-        "https://github.com/julyx10/lap/releases/latest/download/latest.json"
-      ],
+      "endpoints": [],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUzMEQ0QzM2RTRDOUNEMjUKUldRbHpjbmtOa3dOVXlBYm0rYk9lY2FtVGpzWTJ2NkRqdUtSOEN4eUxwRlVTaUlVbkJ4aHhQS3gK"
     }
   }

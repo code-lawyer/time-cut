@@ -1,3 +1,5 @@
+> **Time-cut for Windows** is a local album application based on Lap v0.4.1. It imports photos and videos over USB or from folders, deduplicates copies by content, and organizes media into timelines, places, people and content categories. The Windows guide covers the portable build, the optional AI tools and building from source. [Windows 使用说明](docs/Time-cut-Windows.md)
+
 <div align="center">
   <img src="docs/public/icon.png" alt="Lap Logo" width="120" style="border-radius: 20px">
   <h1>Lap - Private Local Photo Manager</h1>
@@ -249,7 +251,7 @@ sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good
 | [Video.js](https://videojs.com/) | Cross-platform video playback UI |
 | [ONNX Runtime](https://onnxruntime.ai/) | Local AI model inference engine |
 | [CLIP](https://github.com/openai/CLIP) | Image-text similarity search |
-| [InsightFace](https://github.com/deepinsight/insightface) | Face detection and recognition |
+| [OpenCV Zoo YuNet and SFace](https://github.com/opencv/opencv_zoo/tree/47534e27c9851bb1128ccc0102f1145e27f23f98/models) | Local face detection and grouping |
 | [Leaflet](https://leafletjs.com/) | Interactive map for geotagged photos |
 | [daisyUI](https://daisyui.com/) | UI component library |
 

@@ -64,7 +64,7 @@
             />
             <span v-else class="min-w-0 truncate text-sm text-base-content/70">{{ item.label }}</span>
           </div>
-          <span class="ml-auto badge badge-xs shrink-0 text-xs text-base-content/30">
+          <span class="ml-auto badge badge-xs shrink-0 text-xs text-base-content/75">
             {{ item.countLabel || Number(item.count || 0).toLocaleString() }}
           </span>
         </div>
@@ -96,7 +96,7 @@
     </VirtualScroll>
     <!-- Empty State / Loading -->
     <div v-if="fileList.length === 0" class="absolute inset-0 flex flex-col items-center justify-center">
-      <div class="text-base-content/30 flex flex-col items-center gap-2 text-center px-4">
+      <div class="text-base-content/75 flex flex-col items-center gap-2 text-center px-4">
         <Transition name="fade" appear>
           <div v-if="showDelayedLoading" class="flex flex-col items-center gap-2">
             <span class="loading loading-dots loading-lg text-primary"></span>

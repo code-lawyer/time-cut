@@ -2,9 +2,11 @@
   <div ref="dropdown" class="relative inline-block text-left">
 
     <!-- Dropdown Trigger -->
-    <button tabindex="-1"
-      :title="title"
-      class="flex items-center outline-none rounded-box transition-colors duration-300 whitespace-nowrap"
+    <button ref="trigger" type="button" :tabindex="controlLabel ? 0 : -1"
+      :title="title || controlLabel"
+      :aria-label="controlLabel ? `${controlLabel} · ${triggerLabel}` : undefined"
+      :aria-expanded="isDropDown"
+      class="flex items-center rounded-box transition-colors duration-300 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-primary"
       :class="[
         size === 'small' ? 'h-6 text-xs' : 'h-8 py-1 text-sm',
         iconOnly
@@ -20,9 +22,9 @@
       @click="toggleDropdown"
     >
       <component v-if="icon" :is="icon" class="w-4 h-4 shrink-0" />
-      <span v-if="!iconOnly">{{ triggerLabel }}</span>
+      <span v-if="!iconOnly" class="select-trigger-label">{{ triggerLabel }}</span>
       <slot name="trigger-suffix" />
-      <IconArrowDown v-if="!iconOnly" class="w-3 h-3 shrink-0 opacity-50" />
+      <IconArrowDown v-if="!iconOnly" class="select-trigger-arrow w-3 h-3 shrink-0 opacity-50" />
     </button>
 
     <!-- Dropdown Menu -->
@@ -152,6 +154,10 @@ const props = defineProps({
     type: String,
     default: '',
   },
+  controlLabel: {
+    type: String,
+    default: '',
+  },
 });
 
 // Emits
@@ -159,6 +165,7 @@ const emit = defineEmits(['select', 'multi-select']);
 
 // State
 const dropdown = ref(null);
+const trigger = ref(null);
 const menu = ref(null);
 const isDropDown = ref(false);
 const menuStyle = ref({});
@@ -195,11 +202,17 @@ onBeforeUnmount(() => {
 // Handle Escape key press
 const handleKeyDown = (event) => {
   if (isDropDown.value && event.key === 'Escape') {
-    isDropDown.value = false;
+    closeDropdown();
   }
 };
 
-const toggleDropdown = async () => {
+function closeDropdown() {
+  const returnFocus = props.controlLabel && menu.value?.contains(document.activeElement);
+  isDropDown.value = false;
+  if (returnFocus) trigger.value?.focus();
+}
+
+const toggleDropdown = async (event) => {
   if (props.disabled) return;
   isDropDown.value = !isDropDown.value;
 
@@ -244,6 +257,7 @@ const toggleDropdown = async () => {
     }
 
     menuStyle.value = { top: `${top}px`, left: `${left}px` };
+    if (props.controlLabel && event.detail === 0) menu.value?.querySelector('button:not(:disabled)')?.focus();
   }
 };
 
@@ -272,14 +286,14 @@ const selectOption = (index) => {
   }
   optionIndex.value = index;
   emit('select', optionIndex.value, extendIndex.value);
-  isDropDown.value = false;
+  closeDropdown();
 };
 
 const selectExtendOption = (index) => { 
   if (props.extendDisabled) return;
   extendIndex.value = index;
   emit('select', optionIndex.value, extendIndex.value);
-  isDropDown.value = false;
+  closeDropdown();
 };
 
 </script>

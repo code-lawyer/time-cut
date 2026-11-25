@@ -105,9 +105,10 @@ test("single-letter actions match by character and still allow shift", () => {
 
 test("non-letter codes: digits and numpad keep exact physical matching", () => {
   assert.equal(
-    matchesShortcut("app.scale.increase", cmd("+", "NumpadAdd")),
+    matchesShortcut("app.scale.increase", cmd("+", "NumpadAdd"), "mac"),
     true,
   );
+  assert.equal(matchesShortcut("app.scale.increase", event({ key: "+", code: "NumpadAdd", ctrlKey: true }), "windows"), true);
   // Digit bindings stay physical so shifted digit slots keep working on both
   // layouts: QWERTY Shift+1 produces "!" and AZERTY Shift+1 produces "1",
   // and both reach the Digit1 binding through event.code.

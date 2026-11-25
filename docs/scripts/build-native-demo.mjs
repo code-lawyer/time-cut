@@ -16,11 +16,12 @@ const require = createRequire(
   new URL("../../src-vite/package.json", import.meta.url),
 );
 const load = async (name) => import(pathToFileURL(require.resolve(name)).href);
-const { build } = await load("vite");
+const { build, normalizePath } = await load("vite");
 const { default: vue } = await load("@vitejs/plugin-vue");
 const { default: tailwind } = await load("@tailwindcss/vite");
 const { default: svg } = await load("vite-svg-loader");
 const root = fileURLToPath(new URL("../demo-native/", import.meta.url));
+const adapter = normalizePath(fileURLToPath(new URL("../demo-native/tauri.mjs", import.meta.url)));
 const app = fileURLToPath(new URL("../../src-vite/src/", import.meta.url));
 const out = fileURLToPath(new URL("../public/demos/lap/", import.meta.url));
 const seed = addDuplicateFixtures(createState());
@@ -97,7 +98,7 @@ await build({
         if (id.endsWith("/components/TButton.vue"))
           return code.replace(
             'role="button"',
-            'role="button" :aria-label="tooltip || text" :data-demo-tooltip="tooltip"',
+            'role="button" :data-demo-tooltip="tooltip"',
           );
         const component = id.match(
           /\/(Library|AlbumList|SmartAlbumList|ImageSearch|Tag|Calendar|Person|Location|Camera|SelectionPanel|DedupPane|FileInfo)\.vue$/,
@@ -116,7 +117,7 @@ await build({
           return code.replaceAll(
             'const base = `${scheme}/${_thumbLibraryId}/${fileId}`;',
             'const base = demoMediaUrl(fileId);',
-          ).replace(/^/, 'import { demoMediaUrl } from "' + root + '/tauri.mjs";\n');
+          ).replace(/^/, () => `import { demoMediaUrl } from ${JSON.stringify(adapter)};\n`);
         if (id.endsWith("/views/Settings.vue"))
           return code.replace(
             "const appWindow = getCurrentWebviewWindow()",
@@ -136,7 +137,7 @@ await build({
   ],
   resolve: {
     alias: [
-      { find: /^@tauri-apps\/.*/, replacement: `${root}/tauri.mjs` },
+      { find: /^@tauri-apps\/.*/, replacement: adapter },
       { find: "@", replacement: app },
       {
         find: "cally",

@@ -24,7 +24,7 @@
     <!-- title bar -->
     <div
       v-if="!showWelcomeContent"
-      class="absolute top-0 left-0 right-0 px-2 h-12 flex flex-row flex-nowrap items-center justify-between bg-base-300 z-30 overflow-hidden"
+      class="gallery-bar absolute top-0 left-0 right-0 px-2 h-12 flex flex-row flex-nowrap items-center justify-between bg-base-300 z-30 overflow-hidden"
       data-tauri-drag-region
     >
       <!-- title -->
@@ -53,11 +53,13 @@
       </div>
 
       <!-- toolbar -->
-      <div class="flex items-center gap-2 shrink-0">
+      <div class="gallery-actions">
+       <div class="gallery-tools">
 
         <!-- file type options -->
         <DropDownSelect
           :icon="IconFilter"
+          :control-label="$t('timecut.galleryFilter')"
           :options="fileTypeOptions"
           :defaultIndex="fileTypeSelectedIndex"
           :disabled="isFavoritesFilterDisabled"
@@ -81,6 +83,7 @@
 
         <!-- sort type options -->
         <DropDownSelect
+          :control-label="$t('timecut.gallerySort')"
           :icon="isRandomSort ? IconSortingShuffle : (config.search.sortOrder === 0 ? IconSortingAsc : IconSortingDesc)"
           :options="toolbarSortOptions"
           :defaultIndex="toolbarSortType"
@@ -95,6 +98,7 @@
         <!-- global grouping options for query-backed grid views -->
         <DropDownSelect
           :icon="IconGroup"
+          :control-label="$t('timecut.galleryGroup')"
           :options="toolbarGroupOptions"
           :defaultIndex="toolbarGroupIndex"
           :separatorsAfter="toolbarGroupOptions.length > 1 ? [0] : []"
@@ -105,7 +109,7 @@
 
         <!-- select and layout section -->
         <div class="flex flex-row items-center">
-          <IconSeparator class="t-icon-size text-base-content/15" />
+          <IconSeparator class="gallery-separator t-icon-size text-base-content/15" />
           
           <!-- refresh file list -->
           <!-- Bugfix: need to update album files when the album is updated -->
@@ -117,7 +121,7 @@
           /> -->
           
           <!-- grid size slider -->
-          <div class="flex flex-row items-center gap-2 px-2 shrink-0 group">
+          <div class="gallery-zoom flex flex-row items-center gap-2 px-2 shrink-0 group">
             <SliderInput v-model="gridSizePosition"
               :min="0" :max="100" :step="1" label="" :slider_width="80"
               :disabled="isMapView"
@@ -156,7 +160,7 @@
             @click="toggleMapView"
           />
 
-          <IconSeparator class="t-icon-size text-base-content/15" />
+          <IconSeparator class="gallery-separator t-icon-size text-base-content/15" />
           <!-- toggle select mode -->
           <TButton
             :icon="IconMultiSelect"
@@ -175,15 +179,16 @@
             @click="toggleDedupPanel"
           />
 
-          <!-- toggle info panel -->
-          <TButton
-            :icon="IconInformation"
-            :tooltip="$t('toolbar.tooltip.info')"
-            :shortcut="shortcut('meta.info')"
-            :selected="isInfoPanelOpen"
-            @click="toggleInfoPanel"
-          />
         </div>
+       </div>
+       <TButton
+         data-testid="gallery-info"
+         :icon="IconInformation"
+         :tooltip="$t('toolbar.tooltip.info')"
+         :shortcut="shortcut('meta.info')"
+         :selected="isInfoPanelOpen"
+         @click="toggleInfoPanel"
+       />
       </div>
     </div>
 
@@ -820,7 +825,7 @@ import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTime
          setFileRotate, setFileFavorite, setFileRating, setFileCullingFlag, batchUpdateFileMetadata, getTagsForFile, searchSimilarImages, generateEmbedding,
          revealPath, getTagName, indexAlbum, listenIndexProgress, listenIndexFinished, setAlbumCover, setDesktopWallpaper,
          updateFileInfo, refreshFileInfo, changeVideoThumbnail, getSupportedFormatExtensions, importFiles, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, checkFileExists, checkFileAccessibility, isCloudOnlyFile, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, listenFaceIndexProgress,
-         openFilesWithApp, getAppConfig, getIndexRecoveryInfo, clearIndexRecoveryInfo, setLastSelectedItemIndex,
+         openFilesWithApp, getAppConfig, getIndexRecoveryInfo, clearIndexRecoveryInfo, retryInterruptedImportIndex, setLastSelectedItemIndex,
          dedupDelete, getQueryFilePosition, getFolderSearchExcluded,
          listCollections, createCollection, addFilesToCollection, removeFilesFromCollection, getFileCollections, getCollectionCountAndSum, getCollectionFiles, getCollectionGroupedQueryRows, getCollectionGroupFileIds, getCollectionQueryFileIds, fetchFolder, isDirectoryAccessible, checkAlbumAccessibility, addTagToFile, saveXmpMetadata } from '@/common/api';
 import { config, libConfig } from '@/common/config';
@@ -2543,7 +2548,7 @@ function handleNavigateMetadata(payload: { type: string; [key: string]: any }) {
     case 'location': {
       const title = [payload.name, payload.admin1, payload.cc].filter(Boolean).join(', ');
       enterMetadataTempView('location', title, {
-        locationAdmin1: payload.admin1 || '', locationName: payload.name || '', searchFileType: 0,
+        locationCc: payload.cc ?? null, locationAdmin1: payload.admin1 || '', locationName: payload.name || '', searchFileType: 0,
       });
       break;
     }
@@ -3830,11 +3835,13 @@ const currentQueryParams = ref({
   lensModel: "",
   locationAdmin1: "",
   locationName: "",
+  locationCc: null as string | null,
   isFavorite: false,
   rating: -1,
   cullingFlag: -1,
   tagId: 0,
   personId: 0,
+  sceneCategory: null as string | null,
 });
 const currentQuerySource = ref<'query' | 'smart' | 'collection' | 'search'>('query');
 const isMapView = computed(() => config.settings.grid.viewMode === 'map');
@@ -5644,19 +5651,29 @@ const indexRecoveryMessage = computed(() => {
 async function processNextAlbum(skipFilePath: string | null = null, skipRecoveryCheck = false) {
   if (libConfig.index.albumQueue.length > 0) {
     const albumId = libConfig.index.albumQueue[0];
+    const libraryId = libConfig._libraryId;
+    const isCurrent = () => libConfig._libraryId === libraryId && libConfig.index.albumQueue[0] === albumId;
     // Hide the previous scan's completed progress before awaiting album lookup.
     scanProgressSession.value++;
     libConfig.index.phase = 'complete';
     const album = await getAlbum(albumId);
+    if (!isCurrent()) return;
     if (album) {
       // Check for crash recovery: if trace file exists and matches this album
       if (!skipFilePath && !skipRecoveryCheck) {
         const recoveryInfo = await getIndexRecoveryInfo();
+        if (!isCurrent()) return;
         if (recoveryInfo && Number(recoveryInfo.album_id) === Number(albumId)) {
-          recoverySkipFilePath.value = String(recoveryInfo.file_path || '');
-          libConfig.index.status = 2;
-          showIndexRecoveryMsgbox.value = true;
-          return;
+          // Imported albums may retry the interrupted file once after a restart.
+          // A second crash at that same file still offers the existing recovery controls.
+          const resume = await retryInterruptedImportIndex(libraryId, Number(albumId));
+          if (!isCurrent()) return;
+          if (!resume) {
+            recoverySkipFilePath.value = String(recoveryInfo.file_path || '');
+            libConfig.index.status = 2;
+            showIndexRecoveryMsgbox.value = true;
+            return;
+          }
         }
       }
       libConfig.index.status = 1;
@@ -5672,7 +5689,14 @@ async function processNextAlbum(skipFilePath: string | null = null, skipRecovery
       libConfig.index.total = 0;
       libConfig.index.searchTotal = 0;
       libConfig.index.failed = 0;
-      await indexAlbum(albumId, skipFilePath || null);
+      try {
+        await indexAlbum(albumId, skipFilePath || null, libraryId);
+      } catch (error) {
+        if (!isCurrent()) return;
+        toast.error(String(error));
+        libConfig.index.albumQueue.shift();
+        void processNextAlbum();
+      }
     } else {
       // album not found (maybe deleted), remove from queue and process next
       libConfig.index.albumQueue.shift();
@@ -6140,8 +6164,11 @@ onMounted( async() => {
 
   unlistenLibraryTotalRefreshed = await listen('library-total-refreshed', (event: any) => {
     if (event?.payload?.source === 'content') return;
+    if (event.payload?.libraryId && event.payload.libraryId !== libConfig._libraryId) return;
     if (isScanStreamingMode.value) return;
-    if (config.main.sidebarIndex === SIDEBAR.ALBUM) {
+    const importedIntoLibrary = event.payload?.source === 'timecut'
+      && config.main.sidebarIndex === SIDEBAR.LIBRARY && libConfig.library.item === LIB_ITEM.ALL;
+    if (config.main.sidebarIndex === SIDEBAR.ALBUM || importedIntoLibrary) {
       pendingInitialSelectedIndex = selectedItemIndex.value;
       hasRestoredInitialSelection = false;
       updateContent(true);
@@ -6839,7 +6866,8 @@ watch(
     personId: libConfig.person.id,
     calendar: [config.calendar.view, libConfig.calendar.year, libConfig.calendar.month, libConfig.calendar.date],
     tagId: libConfig.tag.id,
-    location: [libConfig.location.admin1, libConfig.location.name],
+    location: [libConfig.location.cc, libConfig.location.admin1, libConfig.location.name],
+    scene: libConfig.scenes.category,
     camera: [config.camera.isCamera, libConfig.camera.make, libConfig.camera.model, (libConfig.camera as any).lensMake, (libConfig.camera as any).lensModel],
   }),
   (nextView, previousView) => {
@@ -6876,7 +6904,8 @@ watch(
     libConfig.person.id,                                                              // person
     config.calendar.view, libConfig.calendar.year, libConfig.calendar.month, libConfig.calendar.date, // calendar
     libConfig.tag.id, libConfig.tag.activateTick, // tag
-    libConfig.location.admin1, libConfig.location.name,                               // location
+    libConfig.location.cc, libConfig.location.admin1, libConfig.location.name,         // location
+    libConfig.scenes.category, config.main.sidebarIndex === SIDEBAR.SCENE ? libConfig.scenes.revision : 0,
     libConfig.camera.make, libConfig.camera.model,                                    // camera 
     config.camera.isCamera, (libConfig.camera as any).lensMake, (libConfig.camera as any).lensModel, // lens
   ], 
@@ -7844,11 +7873,13 @@ async function getFileList(
     lensModel = '',
     locationAdmin1 = '', 
     locationName = '', 
+    locationCc = null as string | null,
     isFavorite = activeFavoritesOnly.value,
     rating = -1,
     cullingFlag = -1,
     tagId = 0,
     personId = 0,
+    sceneCategory = null as string | null,
     gpsMinLat = null,
     gpsMaxLat = null,
     gpsMinLon = null,
@@ -7885,11 +7916,13 @@ async function getFileList(
     lensModel,
     locationAdmin1,
     locationName,
+    locationCc,
     isFavorite,
     rating,
     cullingFlag,
     tagId,
     personId,
+    sceneCategory,
     gpsMinLat,
     gpsMaxLat,
     gpsMinLon,
@@ -8784,12 +8817,17 @@ async function updateContent(force = false, preserveMultiSelection = selectMode.
     } else {
       if(libConfig.location.name) {
         contentTitle.value = `${libConfig.location.admin1} > ${libConfig.location.name}`;
-        getFileList({ locationAdmin1: libConfig.location.admin1, locationName: libConfig.location.name }, requestId);
+        getFileList({ locationCc: libConfig.location.cc, locationAdmin1: libConfig.location.admin1, locationName: libConfig.location.name }, requestId);
       } else {
         contentTitle.value = `${libConfig.location.admin1}`;
-        getFileList({ locationAdmin1: libConfig.location.admin1 }, requestId);
+        getFileList({ locationCc: libConfig.location.cc, locationAdmin1: libConfig.location.admin1 }, requestId);
       } 
     }
+  }
+  else if(newIndex === SIDEBAR.SCENE) {
+    const category = libConfig.scenes.category;
+    contentTitle.value = t(`scene.${category ?? 'all'}`);
+    getFileList({ sceneCategory: category }, requestId);
   }
   else if(newIndex === SIDEBAR.CAMERA) {
     if (!config.camera.isCamera) {
@@ -11908,6 +11946,24 @@ defineExpose({
 </script>
 
 <style scoped>
+.gallery-bar { container: gallery-bar / inline-size; }
+.gallery-actions, .gallery-tools { display: flex; align-items: center; }
+.gallery-actions { min-width: 0; max-width: 100%; flex-shrink: 0; }
+.gallery-tools { min-width: 0; gap: .5rem; }
+.gallery-tools > * { flex-shrink: 0; }
+.gallery-actions > :last-child { flex-shrink: 0; }
+
+@container gallery-bar (max-width: 650px) {
+  .gallery-zoom, .gallery-separator { display: none; }
+}
+@container gallery-bar (max-width: 530px) {
+  .gallery-tools { gap: .25rem; }
+  .gallery-tools :deep(.select-trigger-label), .gallery-tools :deep(.select-trigger-arrow) { display: none; }
+}
+@container gallery-bar (max-width: 350px) {
+  .gallery-tools { overflow-x: auto; scrollbar-width: none; padding-block: .25rem; }
+}
+
 .selection-bar-enter-active,
 .selection-bar-leave-active {
   transition: opacity 0.2s ease-out, transform 0.2s ease-out;

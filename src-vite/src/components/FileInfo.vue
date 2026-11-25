@@ -150,12 +150,14 @@
         <div class="flex items-center gap-2">
         <button type="button" class="flex w-full items-center gap-1 cursor-pointer text-base-content/70 hover:text-base-content" :aria-expanded="showOrganizationPanel" @click="toggleOrganization">
           <IconRight class="w-3 h-3 transition-transform duration-200" :class="{ 'rotate-90': showOrganizationPanel }" />
-          <span class="font-bold uppercase text-xs tracking-wide text-base-content/30">{{ $t('file_info.organization') }}</span>
+          <span class="font-bold uppercase text-xs tracking-wide text-base-content/80">{{ $t('file_info.organization') }}</span>
         </button>
           <TButton :icon="IconEdit" :disabled="!editableMetadataFields.some(field => fieldVisible(`organization.${field.key}`))" :tooltip="$t('file_info.edit_metadata')" :shortcut="getShortcutLabel('meta.edit')" button-size="small" @click.stop="emit('editMetadata', 'e_title')" />
         </div>
         <div class="shrink-0">
           <div v-if="showOrganizationPanel" class="pt-3 space-y-1.5">
+            <SceneField v-if="fileInfo?.id && libConfig._libraryId && [1, 2, 3].includes(fileInfo.file_type)"
+              :file-id="Number(fileInfo.id)" :library="libConfig._libraryId" />
             <FavoriteRatingControl class="pl-4"
               :favorite="Boolean(fileInfo?.is_favorite)"
               :rating="Number(fileInfo?.rating || 0)"
@@ -582,6 +584,7 @@ import {
 import Breadcrumb from '@/components/Breadcrumb.vue';
 import TButton from '@/components/TButton.vue';
 import FavoriteRatingControl from '@/components/FavoriteRatingControl.vue';
+import SceneField from '@/components/SceneField.vue';
 import ImageHistogram from '@/components/ImageHistogram.vue';
 import MapView from '@/components/MapView.vue';
 

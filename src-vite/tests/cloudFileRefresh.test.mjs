@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
+import { readTestSource } from './readSource.mjs';
 import ts from 'typescript';
 import { ref } from 'vue';
 
-const source = fs.readFileSync(new URL('../src/components/RefreshFileInfoDialog.vue', import.meta.url), 'utf8');
+const source = readTestSource('../src/components/RefreshFileInfoDialog.vue');
 const body = ts.transpile(source.split('<script setup lang="ts">')[1].split('</script>')[0]
   .replace(/^import .*;\n/gm, ''), { target: ts.ScriptTarget.ES2022 });
 function fixture(responses, options = {}) {
@@ -174,7 +174,7 @@ test('metadata import and preview failures are both counted while retaining upda
   assert.deepEqual(f.refreshed, [partial]);
 });
 
-const content = fs.readFileSync(new URL('../src/components/Content.vue', import.meta.url), 'utf8');
+const content = readTestSource('../src/components/Content.vue');
 function contentRefresh(startAnchor, endAnchor, dependencies, name) {
   const start = content.indexOf(startAnchor);
   const end = content.indexOf(endAnchor, start);
@@ -230,7 +230,7 @@ test('single-file menu refresh reports warnings and failures for both local and 
 
 test('all supported locales include the metadata import failure count with its placeholder', () => {
   for (const name of ['en','cs','de','es','fr','hu','it','ja','ko','nl','pl','pt','ru','uk','vi','zh-CN','zh-TW']) {
-    const locale = JSON.parse(fs.readFileSync(new URL(`../src/locales/${name}.json`, import.meta.url), 'utf8'));
+    const locale = JSON.parse(readTestSource(`../src/locales/${name}.json`));
     assert.match(locale.msgbox.file_refresh.metadata_failed, /\{count\}/, name);
   }
 });
@@ -239,7 +239,7 @@ test('all supported locales include the metadata import failure count with its p
 test('manual rebuild options and unused locale keys are removed', () => {
   assert.doesNotMatch(source, /rebuildPreviews|rebuild_previews|rebuild_pending/);
   for (const name of ['en','cs','de','es','fr','hu','it','ja','ko','nl','pl','pt','ru','uk','vi','zh-CN','zh-TW']) {
-    const locale = JSON.parse(fs.readFileSync(new URL(`../src/locales/${name}.json`, import.meta.url), 'utf8'));
+    const locale = JSON.parse(readTestSource(`../src/locales/${name}.json`));
     assert.equal(locale.msgbox.file_refresh.rebuild_previews, undefined, name);
     assert.equal(locale.msgbox.file_refresh.rebuild_pending, undefined, name);
   }

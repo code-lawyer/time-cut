@@ -13,6 +13,8 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 
 class DownloadIntegrityTests(unittest.TestCase):
     def setUp(self):
+        self.bash = shutil.which("bash")
+        self.assertIsNotNone(self.bash, "bash is required for downloader tests")
         self.temp = tempfile.TemporaryDirectory(prefix="lap-download-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -35,11 +37,11 @@ class DownloadIntegrityTests(unittest.TestCase):
             "exit 99\n"
         )
         curl.chmod(0o755)
-        self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+        self.env = {**os.environ, "PATH": os.pathsep.join((str(bin_dir), os.environ["PATH"]))}
 
     def run_downloader(self, script, *args):
         return subprocess.run(
-            ["bash", str(self.root / "scripts" / script), *args],
+            [self.bash, str(self.root / "scripts" / script), *args],
             env=self.env,
             capture_output=True,
             text=True,

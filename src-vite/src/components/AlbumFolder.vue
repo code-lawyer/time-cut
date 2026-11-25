@@ -155,9 +155,12 @@
     v-if="showTrashFailedFolderMsgbox"
     :title="$t('msgbox.trash_failed.title')"
     :message="folderTrashFailureMessage"
-    :OkText="$t('msgbox.ok')"
+    :OkText="folderTrashFailure?.canDeletePermanently ? $t('msgbox.trash_failed.ok') : $t('msgbox.ok')"
+    :cancelText="folderTrashFailure?.canDeletePermanently ? $t('msgbox.cancel') : ''"
+    :warningOk="folderTrashFailure?.canDeletePermanently === true"
+    :focusCancel="folderTrashFailure?.canDeletePermanently === true"
     :isLoading="isDeletingFolder"
-    @ok="showTrashFailedFolderMsgbox = false"
+    @ok="confirmTrashFailedFolderDelete"
     @cancel="showTrashFailedFolderMsgbox = false"
   />
 
@@ -344,10 +347,12 @@ const showMoveTo = ref(false);
 const deletePermanently = ref(false);
 const pendingFolderDelete = ref<{ path: string; name: string; libraryId: string; identity: string } | null>(null);
 const isDeletingFolder = ref(false);
-const folderTrashFailure = ref<{ error: string; mayHavePartiallyCompleted?: boolean } | null>(null);
+const folderTrashFailure = ref<{ error: string; canDeletePermanently: boolean; mayHavePartiallyCompleted?: boolean } | null>(null);
 const folderTrashFailureMessage = computed(() => {
   const path = pendingFolderDelete.value?.path || '';
-  const message = `${t('msgbox.move_to_trash.folder_error')}\n\n${path}`;
+  const message = folderTrashFailure.value?.canDeletePermanently
+    ? t('msgbox.trash_failed.folder_content', { folder: path })
+    : `${t('msgbox.move_to_trash.folder_error')}\n\n${path}`;
   const partialWarning = folderTrashFailure.value?.mayHavePartiallyCompleted
     ? `\n\n${t('msgbox.trash_failed.folder_partial_warning')}` : '';
   return `${message}${partialWarning}\n\n${folderTrashFailure.value?.error || ''}`;
@@ -1081,6 +1086,7 @@ const clickTrashFolder = async () => {
         if (result.error) {
           folderTrashFailure.value = {
             error: result.error,
+            canDeletePermanently: result.canDeletePermanently === true,
             mayHavePartiallyCompleted: result.mayHavePartiallyCompleted === true,
           };
         }
@@ -1088,7 +1094,7 @@ const clickTrashFolder = async () => {
     } catch (error) {
       deleteErrored = true;
       if (!deletePermanently.value) {
-        folderTrashFailure.value = { error: String(error) };
+        folderTrashFailure.value = { error: String(error), canDeletePermanently: false };
       }
       console.error('Failed to delete folder:', error);
     }
@@ -1121,8 +1127,10 @@ const clickTrashFolder = async () => {
       }
 
       // Navigate to parent folder (derive parent path from deleted folder's path)
-      const lastSlashIndex = deletedFolderPath.lastIndexOf('/');
-      const parentPath = lastSlashIndex > 0 ? deletedFolderPath.substring(0, lastSlashIndex) : props.rootPath;
+      const lastSlashIndex = Math.max(deletedFolderPath.lastIndexOf('/'), deletedFolderPath.lastIndexOf('\\'));
+      const parentPath = lastSlashIndex >= props.rootPath.length
+        ? deletedFolderPath.substring(0, lastSlashIndex)
+        : props.rootPath;
       selection.folderPath.value = parentPath;
 
       // Try to find parent folder to get its id
@@ -1153,6 +1161,16 @@ const clickTrashFolder = async () => {
   } finally {
     isDeletingFolder.value = false;
   }
+};
+
+const confirmTrashFailedFolderDelete = async () => {
+  if (!showTrashFailedFolderMsgbox.value || isDeletingFolder.value) return;
+  showTrashFailedFolderMsgbox.value = false;
+  const target = pendingFolderDelete.value;
+  if (disposed || !target || target.libraryId !== libConfig._libraryId ||
+      !folderTrashFailure.value?.canDeletePermanently) return;
+  deletePermanently.value = true;
+  await clickTrashFolder();
 };
 
 /// toggle whether folder and children are excluded from search

@@ -11,7 +11,9 @@ targets/features are excluded.
 Update this list when release dependencies, targets or bundled assets change.
 
 Distribution notes:
-InsightFace buffalo_s model weights are restricted to non-commercial research.
+Time-cut bundles OpenCV Zoo YuNet (MIT) and SFace (Apache-2.0).
+The upstream Lap InsightFace buffalo_s notice is retained for historical
+attribution. Current Time-cut Windows packages exclude those weights.
 FFmpeg external-library notices are upstream snapshots; exact binary versions vary by platform.
 GPL/LGPL source and relinking requirements must be assessed separately.
 
@@ -413,7 +415,11 @@ FFmpeg includes optional third-party codec libraries. Their exact versions and l
 Notice [108]: FFmpeg-COPYING.GPLv2
 Notice [109]: FFmpeg-COPYING.GPLv3
 
-InsightFace pretrained models buffalo_s (det_500m / w600k_mbf) (Native / Assets; Non-commercial research only)
+OpenCV Zoo YuNet and SFace model weights
+https://github.com/opencv/opencv_zoo/tree/47534e27c9851bb1128ccc0102f1145e27f23f98/models
+The Time-cut package includes YuNet-LICENSE.txt (MIT) and SFace-LICENSE.txt (Apache-2.0).
+
+InsightFace pretrained models buffalo_s (historical Lap asset; non-commercial research only)
 https://github.com/deepinsight/insightface#license
 The pretrained model weights have separate terms from the MIT-licensed code. Commercial use requires appropriate authorization from the model rights holders.
 Notice [157]: InsightFace-README.md

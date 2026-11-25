@@ -2,9 +2,13 @@
 
 Utility scripts for the Lap project.
 
+## Windows phone import acceptance
+
+For an existing Time-cut profile with one archived phone, `Time-cut.exe --resume-verify-phone N` enables automatic import into the configured archive and requests a verification scan once at least `N` items are visible. Set `N` to the count from the earlier device scan. The normal tray application owns the request across launches. A second complete scan must add zero files and match every source path and content digest, including companion files. The bounded desktop test in `test_timecut_iphone.mjs` remains available for interactive diagnostics.
+
 ## 1. download_models
 
-Downloads AI model files (CLIP + InsightFace) required for the app to `src-tauri/resources/models/`. The Bash script pins model revisions and verifies SHA-256 before reusing cached files or publishing new downloads; a mismatch stops the build. The PowerShell script retains its existing existence-only cache behavior.
+Downloads CLIP, YuNet and SFace to `src-tauri/resources/models/`. Both scripts pin model revisions and verify SHA-256 for cached files and new downloads. The YuNet and SFace license texts are downloaded and verified alongside their weights.
 
 ### Usage
 
@@ -25,8 +29,8 @@ Downloads AI model files (CLIP + InsightFace) required for the app to `src-tauri
 | `tokenizer.json` | OpenAI CLIP ViT-B/32 | Text tokenization |
 | `text_model.onnx` | CLIP ViT-B/32 (quantized) | Text embedding |
 | `vision_model.onnx` | CLIP ViT-B/32 (quantized) | Image embedding |
-| `det_500m.onnx` | InsightFace Buffalo-S | Face detection |
-| `w600k_mbf.onnx` | InsightFace Buffalo-S | Face recognition |
+| `face_detection_yunet_2026may.onnx` | OpenCV Zoo YuNet | Face detection |
+| `face_recognition_sface_2021dec.onnx` | OpenCV Zoo SFace | Face grouping |
 
 ## 2. download_ffmpeg_sidecar
 

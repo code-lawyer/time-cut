@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readTestSource } from './readSource.mjs';
 import { reactive, ref, watch, nextTick, effectScope } from 'vue';
 import ts from 'typescript';
 
-const source = readFileSync(new URL('../src/components/Content.vue', import.meta.url), 'utf8');
+const source = readTestSource('../src/components/Content.vue');
 function between(start, end) {
   const a = source.indexOf(start);
   const b = source.indexOf(end, a);
@@ -27,7 +27,7 @@ function fixture(index = 1) {
   const config = reactive({ main: { sidebarIndex: 9 }, camera: { isCamera: false },
     calendar: { view: 0 }, search: { fileType: 0, sortType: 0 }, settings: { showSubfolderFiles: false } });
   const libConfig = reactive({ _libraryId: 'test', activePane: 'content', collection: {}, library: {},
-    album: {}, smartAlbum: {}, person: {}, calendar: {}, tag: {}, location: {},
+    album: {}, smartAlbum: {}, person: {}, calendar: {}, tag: {}, location: {}, scenes: { category: null, revision: 0 },
     camera: { lensMake: 'Nikon', lensModel: 'Lens 1' }, search: { searchText: '' }, rating: {}, culling: {} });
   const selectedItemIndex = ref(index);
   const fileList = ref([1, 2, 3, 4].map(id => ({ id })));

@@ -74,9 +74,8 @@ onMounted(async () => {
         try {
           event.preventDefault();
 
-          if (isMac) {
-            // macOS convention: close hides the window; the app stays alive and
-            // can be reopened from the Dock. Quitting still uses the native menu.
+          if (isMac || await invoke('timecut_tray_active')) {
+            // USB imports and album indexing continue while the window is hidden.
             await win.hide();
             return;
           }
@@ -100,7 +99,7 @@ onMounted(async () => {
       });
     } else {
       unlistenMainCloseRequested = await win.listen('tauri://close-requested', async () => {
-        if (isMac) {
+        if (isMac || await invoke('timecut_tray_active')) {
           await win.hide();
         } else if (libConfig._initialized) {
           // Mark scanning as paused so it won't auto-resume on restart

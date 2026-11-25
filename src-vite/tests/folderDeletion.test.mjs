@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
+import { readTestSource } from './readSource.mjs';
 import ts from 'typescript';
 import { ref, computed } from 'vue';
 
-const source = fs.readFileSync(new URL('../src/components/AlbumFolder.vue', import.meta.url), 'utf8');
+const source = readTestSource('../src/components/AlbumFolder.vue');
 const body = ts.transpile(
   source.slice(source.indexOf('async function startRenameFolder('), source.indexOf('// more menuitems')) +
   source.slice(source.indexOf('const clickTrashFolder ='), source.indexOf('/// toggle whether folder')),
@@ -83,6 +83,30 @@ test('a switched library rejects the pending target', async () => {
   assert.deepEqual(f.calls, []);
 });
 
+test('dismissing a trash failure or switching libraries invalidates its permanent retry', async () => {
+  for (const changedLibrary of [false, true]) {
+    const f = fixture();
+    const actions = f.run();
+    await actions.startDeleteFolder(folder);
+    await actions.clickTrashFolder();
+    if (changedLibrary) f.deps.libConfig._libraryId = 'two';
+    else f.deps.showTrashFailedFolderMsgbox.value = false;
+    await actions.confirmTrashFailedFolderDelete();
+    assert.deepEqual(f.calls, [['trash', folder.path, 'one', 'identity-one']]);
+  }
+});
+
+test('the permanent deletion preference still requires the initial confirmation', async () => {
+  const f = fixture();
+  f.deps.config = { settings: { fileDeleteBehavior: 'permanent' } };
+  const actions = f.run();
+  await actions.startDeleteFolder(folder);
+  assert.equal(f.deps.showTrashFolderMsgbox.value, true);
+  assert.deepEqual(f.calls, []);
+  await actions.clickTrashFolder();
+  assert.deepEqual(f.calls, [['permanent', folder.path, 'one', 'identity-one']]);
+});
+
 test('backend errors release the busy state without offering permanent deletion', async () => {
   const f = fixture(); f.deps.deleteFolder = async () => { throw Error('Rejected'); };
   const actions = f.run(); await actions.startDeleteFolder(folder);
@@ -112,6 +136,21 @@ test('successful deletion updates the captured folder and leaves siblings intact
   assert.equal(f.deps.selection.folderPath.value, '/album');
   assert.equal(f.deps.showTrashFolderMsgbox.value, false);
   assert.equal(f.deps.isDeletingFolder.value, false);
+});
+
+test('deleting a nested Windows folder returns to its immediate parent', async () => {
+  const f = fixture();
+  f.deps.props.rootPath = 'D:\\album';
+  const child = { path: 'D:\\album\\trip\\day', name: 'day' };
+  f.deps.props.children = [child];
+  f.deps.selection.folderId = ref(2);
+  f.deps.getFolderByPath = () => ({ id: 1 });
+  f.deps.toast.success = () => {};
+  f.deps.deleteFolder = async () => ({ deletedCount: 1, canDeletePermanently: false });
+  const actions = f.run();
+  await actions.startDeleteFolder(child);
+  await actions.clickTrashFolder();
+  assert.equal(f.deps.selection.folderPath.value, 'D:\\album\\trip');
 });
 
 for (const error of ['Permission denied', 'File is in use', 'Network disconnected', 'Path not found', 'Uncertain partial result']) {

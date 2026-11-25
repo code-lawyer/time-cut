@@ -61,6 +61,15 @@ pub fn init_ffmpeg_path(app: &AppHandle) {
     }
 }
 
+pub fn init_portable_ffmpeg_path() {
+    if let Some(dir) = std::env::current_exe().ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("ffmpeg")))
+        .filter(|dir| dir.is_dir())
+    {
+        let _ = SIDE_CAR_DIR.set(dir);
+    }
+}
+
 /// Manages active FFmpeg/FFprobe processes, allowing per-player cancellation.
 pub struct VideoManager {
     pub active_processes: Mutex<HashMap<String, (u64, tokio::process::Child)>>,

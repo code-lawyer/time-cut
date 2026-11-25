@@ -17,7 +17,7 @@ class HTMLElementStub {
   }
 }
 const event = (extra = {}) => ({ key: 'a', code: 'KeyA', repeat: false,
-  ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, defaultPrevented: false,
+  ctrlKey: false, metaKey: false, altKey: true, shiftKey: false, defaultPrevented: false,
   target: new HTMLElementStub(),
   preventDefault() { this.defaultPrevented = true; }, ...extra });
 
@@ -37,13 +37,14 @@ function hostHandler(viewer, mode, toggle, overrides = {}) {
     { target: ts.ScriptTarget.ES2022 }) + `;return ${viewer ? 'handleKeyDown' : 'handleLocalKeyDown'};`)(...Object.values(deps));
 }
 
-test('A is available across preview contexts without conflicting with Select All or keyboard layouts', () => {
+test('Alt+A is available across preview contexts without conflicting with plain A, Select All or keyboard layouts', () => {
   for (const platform of ['mac', 'windows', 'linux']) {
     assert.equal(matchesShortcut('view.toggleAfAreas', event(), platform), true);
-    assert.equal(getShortcutLabel('view.toggleAfAreas', platform), 'A');
+    assert.equal(getShortcutLabel('view.toggleAfAreas', platform), platform === 'mac' ? '⌥A' : 'Alt+A');
+    assert.equal(matchesShortcut('view.toggleAfAreas', event({ altKey: false }), platform), false);
     assert.equal(matchesShortcut('view.toggleAfAreas', event({ key: 'a', code: 'KeyQ' }), platform), true);
     assert.equal(matchesShortcut('view.toggleAfAreas', event({ key: 'q', code: 'KeyA' }), platform), false);
-    for (const modifier of ['ctrlKey', 'metaKey', 'altKey', 'shiftKey']) {
+    for (const modifier of ['ctrlKey', 'metaKey', 'shiftKey']) {
       assert.equal(matchesShortcut('view.toggleAfAreas', event({ [modifier]: true }), platform), false);
     }
     for (const context of ['content', 'media-viewer', 'image-viewer']) {
@@ -68,7 +69,7 @@ test('quick preview, Filmstrip, and independent viewer invoke the button action 
   }
 });
 
-test('grid-only browsing, dialogs, and slideshow never toggle AF through A', () => {
+test('grid-only browsing, dialogs, and slideshow never toggle AF through Alt+A', () => {
   let calls = 0;
   const toggle = () => { calls++; };
   hostHandler(false, 'none', toggle)(event());

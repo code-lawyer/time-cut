@@ -432,6 +432,11 @@ fn build_libjpeg(manifest_dir: &Path, out_dir: &Path, is_windows: bool) -> Optio
         if !is_windows {
             configure.arg("-G").arg("Unix Makefiles");
         }
+        println!("cargo:rerun-if-env-changed=LAP_JPEG_NO_SIMD");
+        if is_windows && env::var_os("LAP_JPEG_NO_SIMD").is_some() {
+            // The Visual Studio generator can reject the NASM runtime-library flags.
+            configure.arg("-DWITH_SIMD=OFF");
+        }
         configure
             .arg("-DCMAKE_BUILD_TYPE=Release")
             .arg("-DCMAKE_POSITION_INDEPENDENT_CODE=ON")

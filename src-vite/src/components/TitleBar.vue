@@ -23,7 +23,7 @@
       <!-- Icon -->
       <img 
         v-if="icon" 
-        :src="icon" 
+        :src="icon" alt=""
         class="w-5 h-5 mr-2 select-none rounded" 
         data-tauri-drag-region 
       />
@@ -50,18 +50,18 @@
 
     <!-- Window Control Buttons -->
     <div v-if="showDesktopWindowControls" class="h-10 mb-auto flex items-center" @mousedown.stop>
-      <IconWinMinus v-if="resizable" 
-        class="p-3 w-12 h-full text-base-content/70 hover:text-base-content hover:bg-base-100 transition-colors duration-300" 
-        @click.stop="minimizeWindow" 
-      />
-      <component v-if="resizable" :is="isMaximized ? IconWinRestore : IconWinMaximize" 
-        class="p-3 w-12 h-full text-base-content/70 hover:text-base-content hover:bg-base-100 transition-colors duration-300" 
-        @click.stop="toggleMaximizeWindow" 
-      />
-      <IconClose 
-        class="p-3 w-12 h-full text-base-content/70 hover:text-base-content hover:bg-red-500 transition-colors duration-300" 
-        @click.stop="closeWindow" 
-      />
+      <button v-if="resizable" type="button" class="window-control"
+        :aria-label="$t('timecut.minimizeWindow')" @click.stop="appWindow.minimize()">
+        <IconWinMinus aria-hidden="true" />
+      </button>
+      <button v-if="resizable" type="button" class="window-control"
+        :aria-label="$t(isMaximized ? 'timecut.restoreWindow' : 'timecut.maximizeWindow')" @click.stop="toggleMaximizeWindow">
+        <component :is="isMaximized ? IconWinRestore : IconWinMaximize" aria-hidden="true" />
+      </button>
+      <button type="button" class="window-control close-window"
+        :aria-label="$t('timecut.closeWindow')" @click.stop="appWindow.close()">
+        <IconClose aria-hidden="true" />
+      </button>
     </div>
 
   </div>
@@ -70,8 +70,7 @@
 
 <script setup>
 
-import { ref, watch } from 'vue';
-import { emit } from '@tauri-apps/api/event';
+import { onMounted, onUnmounted, ref } from 'vue';
 import { getCurrentWindow  } from '@tauri-apps/api/window';
 import { isWin, isMac, isLinux } from '@/common/utils';
 
@@ -101,55 +100,32 @@ const props = defineProps({
   }
 });
 
-const searchValue = ref('');
-
 const appWindow = getCurrentWindow();
 const isMaximized = ref(false);
 const showDesktopWindowControls = isWin || isLinux;
+let stopResize;
+let disposed = false;
 
-watch(() => searchValue.value, (newValue) => { 
-  console.log('searchValue:', newValue);
-  emit('message-from-titlebar', { message: 'search', search: searchValue.value });
+async function syncWindowState() { isMaximized.value = await appWindow.isMaximized(); }
+async function toggleMaximizeWindow() {
+  if (await appWindow.isMaximized()) await appWindow.unmaximize();
+  else await appWindow.maximize();
+  await syncWindowState();
+}
+onMounted(async () => {
+  if (!showDesktopWindowControls || !props.resizable) return;
+  const stop = await appWindow.onResized(syncWindowState);
+  if (disposed) { stop(); return; }
+  stopResize = stop;
+  await syncWindowState();
 });
-
-// drag window
-// const onMousedown = (e) => {
-//   if (e.detail === 1 && !isMaximized.value) {   // 1: single click
-//     appWindow.startDragging();
-//   }
-// };
-
-const minimizeWindow = () => {
-  appWindow.minimize();
-};
-
-const toggleMaximizeWindow = () => {
-  appWindow.isMaximized().then((maximized) => {
-    if (maximized) {
-      isMaximized.value = false;
-      appWindow.unmaximize();
-    } else {
-      isMaximized.value = true;
-      appWindow.maximize();
-    }
-  });
-};
-
-const closeWindow = () => {
-  appWindow.close();
-};
-
+onUnmounted(() => { disposed = true; stopResize?.(); });
 </script>
 
-<style>
-@media (max-width: 400px) {
-  #responsiveDiv {
-    visibility: hidden;
-  }
-}
-@media (min-width: 400px) {
-  #responsiveDiv {
-    visibility: visible;
-  }
-}
+<style scoped>
+.window-control { display: grid; place-items: center; width: 3rem; height: 100%; color: var(--color-base-content); }
+.window-control svg { width: 1rem; height: 1rem; }
+.window-control:hover { background: var(--color-base-100); }
+.window-control:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -3px; }
+.close-window:hover { background: #c42b1c; color: white; }
 </style>

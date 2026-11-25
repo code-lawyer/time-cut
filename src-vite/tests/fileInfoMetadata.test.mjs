@@ -1,11 +1,11 @@
 import ts from 'typescript';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readTestSource } from './readSource.mjs';
 import { compile, computed, createSSRApp, ref, reactive } from 'vue';
 import { renderToString } from 'vue/server-renderer';
 
-const source = await readFile(new URL('../src/components/FileInfo.vue', import.meta.url), 'utf8');
+const source = readTestSource('../src/components/FileInfo.vue');
 
 test('searchable source metadata displays the indexed values, including empty values', () => {
   const start = source.indexOf('const sourceKeys =');
@@ -89,7 +89,7 @@ test('section visibility follows field choices even when values are empty', () =
 
 
 test('GPS display uses DMS and hemisphere letters with correct rounding at boundaries', async () => {
-  const utils = await readFile(new URL('../src/common/utils.ts', import.meta.url), 'utf8');
+  const utils = readTestSource('../src/common/utils.ts');
   const start = utils.indexOf('export function formatGpsCoordinates(');
   const end = utils.indexOf('/// format camera', start);
   assert.ok(start >= 0 && end > start);
@@ -209,7 +209,7 @@ test('timeout cancels reads and releases the complete DB-only panel', async () =
 });
 
 test('empty-file message is shown only when the parent confirms the new view is empty', async () => {
-  const content = await readFile(new URL('../src/components/Content.vue', import.meta.url), 'utf8');
+  const content = readTestSource('../src/components/Content.vue');
   assert.match(content, /:empty="hasConfirmedEmptyContent"/);
   const start = source.indexOf('<div v-else-if="empty"');
   const end = source.indexOf('\n  </div>\n</template>', start);
@@ -233,7 +233,7 @@ test('DB-only field choices do not start realtime metadata reads', () => {
 });
 
 test('field choices allow no fields and reject unknown fields', async () => {
-  const registry = await readFile(new URL('../src/common/fileInfoFields.ts', import.meta.url), 'utf8');
+  const registry = readTestSource('../src/common/fileInfoFields.ts');
   const module = await import(`data:text/javascript;base64,${Buffer.from(ts.transpile(registry, {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext})).toString('base64')}`);
   assert.deepEqual(module.normalizeFileInfoFields([]), []);
   assert.equal(module.allFileInfoFields.includes('source.description'), false);
@@ -241,7 +241,7 @@ test('field choices allow no fields and reject unknown fields', async () => {
   assert.deepEqual(module.normalizeFileInfoFields(undefined), module.normalizeFileInfoFields(module.defaultFileInfoFields));
   assert.equal(module.normalizeFileInfoFields(module.defaultFileInfoFields).length, module.defaultFileInfoFields.length);
   for (const locale of ['en','cs','de','es','fr','hu','it','ja','ko','nl','pl','pt','ru','uk','vi','zh-CN','zh-TW']) {
-    const messages = JSON.parse(await readFile(new URL(`../src/locales/${locale}.json`, import.meta.url), 'utf8'));
+    const messages = JSON.parse(readTestSource(`../src/locales/${locale}.json`));
     for (const group of module.fileInfoFieldGroups) {
       for (const key of [group.label, ...group.fields.map(field => field.label)].filter(key => key !== 'GPS')) {
         assert.equal(typeof key.split('.').reduce((object, part) => object?.[part], messages), 'string', `${locale}: ${key}`);
@@ -318,7 +318,7 @@ test('File section follows rendered fields and ignores the retired duration sett
 
 
 test('File Info switches between paired files and shows duration only on MOV', async () => {
-  const utils = await readFile(new URL('../src/common/utils.ts', import.meta.url), 'utf8');
+  const utils = readTestSource('../src/common/utils.ts');
   const helpers = utils.slice(utils.indexOf('export function formatVideoDurationBadge'), utils.indexOf('export function formatDuration'));
   const code = source.slice(source.indexOf('const isLivePhoto ='), source.indexOf('const generalFileUnavailable'));
   const watchStart = source.lastIndexOf('watch(', source.indexOf('props.fileInfo?.id, hasFileCompanion.value'));
@@ -375,8 +375,8 @@ return { generalInfoTab, generalFileInfo, videoDurationBadge, primaryFileLabel, 
 
 
 test('StatusBar shows a Live Photo as one item with the combined size', async () => {
-  const statusBar = await readFile(new URL('../src/components/StatusBar.vue', import.meta.url), 'utf8');
-  const utils = await readFile(new URL('../src/common/utils.ts', import.meta.url), 'utf8');
+  const statusBar = readTestSource('../src/components/StatusBar.vue');
+  const utils = readTestSource('../src/common/utils.ts');
   const templateStart = statusBar.indexOf('<div class="flex h-full');
   const templateEnd = statusBar.indexOf('<ContextMenu', templateStart);
   assert.ok(templateStart >= 0 && templateEnd > templateStart);

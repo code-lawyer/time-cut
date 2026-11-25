@@ -37,6 +37,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 // Scoped refreshes and RAW thumbnail requests can open several connections.
 // Keep their library stable until all reads and writes have completed.
 static FILE_REFRESH_LIBRARY_LOCK: RwLock<()> = RwLock::new(());
+// Album scans use the selected database until their final sweep. A switch waits for
+// the outgoing scans to drain before changing that database underneath them.
+static SCAN_LIBRARY: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 // Linux serves clipboard data from its owner; keep it alive between commands.
 // Serialize writes from the main window and separate viewer windows.
@@ -65,6 +68,22 @@ pub(crate) fn with_current_library<T>(
 
 // cancellation token for indexing
 pub struct IndexCancellation(pub Arc<Mutex<HashMap<i64, bool>>>);
+
+pub(crate) async fn drain_library_scans<'a>(
+    gate: &'a tokio::sync::RwLock<()>, cancellation: &IndexCancellation,
+) -> Result<tokio::sync::RwLockWriteGuard<'a, ()>, String> {
+    let change = gate.write();
+    tokio::pin!(change);
+    loop {
+        for flag in cancellation.0.lock().map_err(|e| e.to_string())?.values_mut() {
+            *flag = true;
+        }
+        tokio::select! {
+            guard = &mut change => return Ok(guard),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => (),
+        }
+    }
+}
 pub struct ImportCancellation(pub Arc<Mutex<ImportState>>);
 
 pub struct ImportState {
@@ -430,10 +449,27 @@ pub fn edit_library(id: &str, name: &str) -> Result<(), String> {
 
 /// remove a library (also deletes the database file)
 #[tauri::command]
-pub async fn remove_library(id: String) -> Result<(), String> {
+pub async fn remove_library(app_handle: AppHandle, id: String, state: State<'_, IndexCancellation>) -> Result<(), String> {
+    let current = SCAN_LIBRARY.read().await;
+    if t_config::current_library_id()? != id {
+        // Removing an inactive catalog need not cancel the selected catalog's scan.
+        return remove_library_storage(id, false).await.map(|_| ());
+    }
+    drop(current);
+    let _scans = drain_library_scans(&SCAN_LIBRARY, &state).await?;
+    let corrupted = remove_library_storage(id, true).await?;
+    refresh_selected_library(app_handle, corrupted).await
+}
+
+async fn remove_library_storage(id: String, load_replacement: bool) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = FILE_REFRESH_LIBRARY_LOCK.write().map_err(|e| e.to_string())?;
-        t_config::remove_library(&id)
+        crate::ingest::catalog::changing(|| {
+            // Windows cannot remove a DB which the pool is still holding open.
+            t_sqlite::clear_conn_pool();
+            t_config::remove_library(&id)?;
+            if load_replacement { initialize_selected_library() } else { Ok(false) }
+        })
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -443,26 +479,34 @@ pub fn is_database_corrupted() -> bool {
     t_sqlite::is_database_corrupted()
 }
 
+fn initialize_selected_library() -> Result<bool, String> {
+    t_utils::clear_album_accessibility();
+    match t_sqlite::create_db() {
+        Ok(()) => Ok(false),
+        Err(e) if e == t_sqlite::DB_CORRUPTED_MSG => Ok(true),
+        Err(e) => Err(e),
+    }
+}
+
 /// switch to a different library
 #[tauri::command]
-pub async fn switch_library(app_handle: tauri::AppHandle, id: String) -> Result<(), String> {
+pub async fn switch_library(app_handle: tauri::AppHandle, id: String, state: State<'_, IndexCancellation>) -> Result<(), String> {
+    let _scans = drain_library_scans(&SCAN_LIBRARY, &state).await?;
     // The blocking task reports whether the target library turned out to be corrupt, deciding from
     // create_db's returned error itself rather than re-reading the process-global flag afterwards
     // (which a concurrent switch could resolve against a different library).
     let corrupted = tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
         let _guard = FILE_REFRESH_LIBRARY_LOCK.write().map_err(|e| e.to_string())?;
         t_config::switch_library(&id)?;
-        t_utils::clear_album_accessibility();
         t_sqlite::clear_conn_pool();
-        match t_sqlite::create_db() {
-            Ok(()) => Ok(false),
-            Err(e) if e == t_sqlite::DB_CORRUPTED_MSG => Ok(true),
-            Err(e) => Err(e),
-        }
+        initialize_selected_library()
     })
     .await
     .map_err(|e| format!("Failed to join switch library task: {}", e))??;
+    refresh_selected_library(app_handle, corrupted).await
+}
 
+async fn refresh_selected_library(app_handle: AppHandle, corrupted: bool) -> Result<(), String> {
     if corrupted {
         return Ok(());
     }
@@ -652,28 +696,24 @@ pub async fn list_album_subfolders(path: String) -> Result<Vec<String>, String> 
 /// remove an album
 #[tauri::command]
 pub async fn remove_album(state: State<'_, IndexCancellation>, id: i64) -> Result<usize, String> {
+    let library_id = t_config::current_library_id()?;
     let _removal_guard = t_utils::AlbumRemovalGuard::acquire(id);
     state.0.lock().unwrap().insert(id, true);
     t_utils::wait_for_album_scan_end(id).await?;
 
-    let result = {
-        let album_sync_lock = t_utils::album_sync_lock(id);
-        let _album_sync_guard = album_sync_lock
-            .lock()
-            .map_err(|_| format!("Album sync lock poisoned: {}", id))?;
-        Album::delete_from_db(id)
-            .map_err(|e| format!("Error while removing album with id {}: {}", id, e))?
-    };
-    t_utils::release_album_sync_lock(id);
-
-    let library_id = crate::t_config::load_app_config()
-        .map(|c| c.current_library_id)
-        .unwrap_or_else(|_| "default".to_string());
-    if let Err(error) = crate::t_cache_storage::remove_album_cache(&library_id, id) {
-        eprintln!("Album {id} was removed, but its thumbnail cache could not be cleaned: {error}");
-    }
-
-    Ok(result)
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = with_current_library(&library_id, || {
+            let album_sync_lock = t_utils::album_sync_lock(id);
+            let _album_sync_guard = album_sync_lock.lock()
+                .map_err(|_| format!("Album sync lock poisoned: {id}"))?;
+            crate::ingest::catalog::changing(|| Album::delete_from_db(id))
+        }).map_err(|e| format!("Error while removing album with id {id}: {e}"))?;
+        t_utils::release_album_sync_lock(id);
+        if let Err(error) = crate::t_cache_storage::remove_album_cache(&library_id, id) {
+            eprintln!("Album {id} was removed, but its thumbnail cache could not be cleaned: {error}");
+        }
+        Ok(result)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -690,25 +730,35 @@ pub fn set_album_cover(id: i64, file_id: i64) -> Result<usize, String> {
 
 /// index album
 #[tauri::command]
-pub fn index_album(
+pub async fn index_album(
     app_handle: tauri::AppHandle,
-    state: State<IndexCancellation>,
+    state: State<'_, IndexCancellation>,
     album_id: i64,
     thumbnail_size: u32,
     raw_display_options: RawDisplayOptions,
     skip_file_path: Option<String>,
     group_raw_jpeg_pairs: bool,
+    expected_library: Option<String>,
 ) -> Result<(), String> {
+    let requested_library = match expected_library {
+        Some(id) => id,
+        None => t_config::current_library_id()?,
+    };
+    let scan_session = SCAN_LIBRARY.read().await;
     let library_id = t_config::current_library_id()?;
+    if requested_library != library_id {
+        return Err("Library changed".into());
+    }
     // Reset cancellation flag
     state.0.lock().unwrap().insert(album_id, false);
     let cancellation_token = state.0.clone();
 
     tauri::async_runtime::spawn(async move {
+        let _scan_session = scan_session;
         if let Err(e) = t_utils::index_album_worker(
             &app_handle,
             cancellation_token,
-            library_id,
+            library_id.clone(),
             album_id,
             thumbnail_size,
             raw_display_options,
@@ -718,6 +768,7 @@ pub fn index_album(
         .await
         {
             eprintln!("Error indexing album {}: {}", album_id, e);
+            t_utils::report_index_failure(&app_handle, library_id, album_id);
         }
     });
     Ok(())
@@ -849,19 +900,20 @@ pub fn create_folder(path: &str, folder_name: &str) -> Option<String> {
 
 /// rename a folder
 #[tauri::command]
-pub fn rename_folder(folder_path: &str, new_folder_name: &str) -> Option<String> {
-    let new_folder_path = t_utils::rename_folder(folder_path, new_folder_name);
-
-    match new_folder_path {
-        Some(new_path) => {
-            if let Err(e) = Album::rename_root_folder(folder_path, &new_path) {
-                eprintln!("Error while renaming root folder in DB: {}", e);
-                return None;
-            }
-            Some(new_path)
-        }
-        None => None,
-    }
+pub async fn rename_folder(folder_path: String, new_folder_name: String) -> Option<String> {
+    let library_id = t_config::current_library_id().ok()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        with_current_library(&library_id, || crate::ingest::catalog::changing(|| {
+            let Some(new_path) = t_utils::rename_folder(&folder_path, &new_folder_name) else {
+                return Ok(None);
+            };
+            Album::rename_root_folder(&folder_path, &new_path)?;
+            Ok(Some(new_path))
+        })).unwrap_or_else(|error| {
+            eprintln!("Error while renaming folder {folder_path}: {error}");
+            None
+        })
+    }).await.ok().flatten()
 }
 
 /// move a folder
@@ -4882,8 +4934,13 @@ pub fn cancel_face_index(state: State<t_face::FaceIndexCancellation>) -> Result<
 
 /// reset all faces (delete all faces and persons)
 #[tauri::command]
-pub fn reset_faces() -> Result<(), String> {
-    t_sqlite::Face::reset_all().map_err(|e| format!("Error while resetting faces: {}", e))
+pub fn reset_faces(status_state: State<t_face::FaceIndexingStatus>) -> Result<(), String> {
+    let library = t_config::current_library_id()?;
+    let running = status_state.0.lock().map_err(|e| e.to_string())?;
+    if *running {
+        return Err("Pause face indexing before resetting the people index".into());
+    }
+    with_current_library(&library, t_sqlite::Face::reset_all)
 }
 
 /// check if face indexing is running, return (is_running, progress)

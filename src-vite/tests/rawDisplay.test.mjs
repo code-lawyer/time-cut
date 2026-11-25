@@ -84,7 +84,10 @@ test('a superseded RAW response cannot replace the latest source or leak a blob 
 });
 
 const utilsSource = fs.readFileSync(new URL('../src/common/utils.ts', import.meta.url), 'utf8');
-const previewUrlSource = ts.transpile(utilsSource.slice(utilsSource.indexOf('export function getPreviewUrl('), utilsSource.indexOf('export function shouldUseBackendPreview(')).replace('export ', ''), { target: ts.ScriptTarget.ES2022 });
+const utilsModule = ts.createSourceFile('utils.ts', utilsSource, ts.ScriptTarget.ES2022);
+const previewUrlFn = utilsModule.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'getPreviewUrl');
+assert.ok(previewUrlFn);
+const previewUrlSource = ts.transpile(previewUrlFn.getText(utilsModule).replace(/^export /, ''), { target: ts.ScriptTarget.ES2022 });
 
 test('editor URL selects the export pipeline regardless of RAW browsing settings', () => {
   const getPreviewUrl = new Function('isWin', '_thumbLibraryId', 'useUIStore', 'appendRawDisplayParams', previewUrlSource + '; return getPreviewUrl;')(

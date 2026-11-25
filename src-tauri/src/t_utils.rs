@@ -2402,7 +2402,7 @@ struct AlbumScanGuard {
 }
 
 impl AlbumScanGuard {
-    fn acquire(album_id: i64) -> Result<Self, String> {
+    fn acquire(album_id: i64) -> Result<Option<Self>, String> {
         let sync_lock = album_sync_lock(album_id);
         let _sync_guard = sync_lock.lock()
             .map_err(|_| format!("Album sync lock poisoned: {album_id}"))?;
@@ -2411,9 +2411,9 @@ impl AlbumScanGuard {
         }
         let mut active = ACTIVE_ALBUM_SCANS.lock().unwrap();
         if !active.insert(album_id) {
-            return Err(format!("Album {} is already being scanned", album_id));
+            return Ok(None);
         }
-        Ok(Self { album_id })
+        Ok(Some(Self { album_id }))
     }
 }
 
@@ -3931,10 +3931,11 @@ struct ProgressPayload {
     scan_total_size: u64,
 }
 
-#[derive(serde::Serialize, Clone)]
+#[derive(serde::Serialize, Clone, Default)]
 struct FinishedPayload {
     album_id: i64,
     phase: String,
+    scan_complete: bool,
     indexed: u64,
     processed: u64,
     search_ready: u64,
@@ -3948,6 +3949,15 @@ struct FinishedPayload {
     scan_total_size: u64,
     library_id: String,
     metadata_failed: u64,
+}
+
+pub(crate) fn report_index_failure(app: &tauri::AppHandle, library_id: String, album_id: i64) {
+    let payload = FinishedPayload {
+        library_id, album_id, phase: "failed".into(), failed: 1, ..Default::default()
+    };
+    if let Err(error) = app.emit("index_finished", payload) {
+        eprintln!("Unable to report indexing failure: {error}");
+    }
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -4178,12 +4188,11 @@ impl ProgressTracker {
         album_id: i64,
         total: u64,
         search_total: u64,
-        discovered: u64,
         scan_total: u64,
         scan_total_size: u64,
     ) -> Self {
         let snapshot = ProgressSnapshot {
-            discovered,
+            discovered: 0,
             processed: 0,
             search_ready: 0,
             total,
@@ -4493,8 +4502,11 @@ pub async fn index_album_worker(
     skip_file_path: Option<String>,
     group_raw_jpeg_pairs: bool,
 ) -> Result<(), String> {
-    let _album_scan_guard = tauri::async_runtime::spawn_blocking(move || AlbumScanGuard::acquire(album_id))
-        .await.map_err(|error| error.to_string())??;
+    let Some(_album_scan_guard) = tauri::async_runtime::spawn_blocking(move || AlbumScanGuard::acquire(album_id))
+        .await.map_err(|error| error.to_string())?? else {
+        // The existing worker will emit the authoritative completion event for this album.
+        return Ok(());
+    };
     let (album, metadata_failures) = crate::t_cmds::with_current_library(&scan_library_id, || {
         let album = Album::get_album_by_id(album_id)?;
         let conn = crate::t_sqlite::open_conn()?;
@@ -4512,6 +4524,7 @@ pub async fn index_album_worker(
                 "index_finished",
                 FinishedPayload {
                     library_id: scan_library_id.clone(),
+                    scan_complete: false,
                     metadata_failed: metadata_failures.count(),
                     album_id,
                     phase: "complete".to_string(),
@@ -4538,6 +4551,7 @@ pub async fn index_album_worker(
     let Some((_folders, image_count, _image_size, video_count, _video_size, scan_total, scan_total_size)) = counts else {
         app_handle.emit("index_finished", FinishedPayload {
             library_id: scan_library_id.clone(),
+            scan_complete: false,
             metadata_failed: metadata_failures.count(),
             album_id,
             phase: "discovering".to_string(),
@@ -4558,24 +4572,13 @@ pub async fn index_album_worker(
     let total_files = image_count + video_count;
     let search_total = image_count;
 
-    // Resume only when totals match and previous indexed is a valid in-progress value.
-    // This avoids breaking normal re-scan behavior after a completed run.
-    let resume_from = if previous_total == total_files
-        && previous_indexed > 0
-        && previous_indexed < total_files
-    {
-        previous_indexed
-    } else {
-        0
-    };
-
-    // 3. Emit start progress
+    // Every new scan must see each path before it can sweep missing rows. The
+    // per-file index reuses existing metadata and previews for unchanged originals.
     let tracker = Arc::new(Mutex::new(ProgressTracker::new(
         app_handle,
         album_id,
         total_files,
         search_total,
-        resume_from,
         scan_total,
         scan_total_size,
     )));
@@ -4587,7 +4590,6 @@ pub async fn index_album_worker(
     // 4. Traverse and index
     let mut is_cancelled = false;
     let mut traversal_failed = false;
-    let mut traversed_count = 0u64;
     // WalkDir already visits every directory during indexing.  Record the
     // direct-parent relationship here so the sidebar never needs to rescan an
     // unchanged directory just to decide whether to show its expand arrow.
@@ -4658,12 +4660,6 @@ pub async fn index_album_worker(
             let path_str = entry.path().to_string_lossy().to_string();
             if let Some(ftype) = get_file_type(&path_str) {
                 if !album.allows_file_type(ftype) || skip_excluded_image(&album, &path_str, ftype)?.is_some() { continue; }
-                // Resume mode: skip already-indexed prefix files.
-                if traversed_count < resume_from {
-                    traversed_count += 1;
-                    continue;
-                }
-
                 // Persist current file pointer for post-crash diagnosis.
                 write_index_trace(album_id, &path_str);
 
@@ -4682,7 +4678,6 @@ pub async fn index_album_worker(
                         });
                         tracker.maybe_emit();
                     });
-                    traversed_count += 1;
                     continue;
                 }
 
@@ -4715,7 +4710,6 @@ pub async fn index_album_worker(
                             });
                             tracker.maybe_emit();
                         });
-                        traversed_count += 1;
                         continue;
                     }
                     if let Some(task) = outcome.task {
@@ -4760,7 +4754,6 @@ pub async fn index_album_worker(
                     });
                 }
 
-                traversed_count += 1;
             } else if !is_ignored_scan_sidecar(entry.path()) {
                 let file_size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
                 with_progress_tracker(&tracker, |tracker| {
@@ -4900,6 +4893,7 @@ pub async fn index_album_worker(
             "index_finished",
             FinishedPayload {
                 library_id: scan_library_id,
+                scan_complete,
                 metadata_failed: metadata_failures.count(),
                 album_id,
                 phase: final_snapshot.phase().to_string(),

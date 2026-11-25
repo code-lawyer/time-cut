@@ -1118,7 +1118,13 @@ onMounted( async () => {
       const albumId = Number(updatedAlbum?.id || 0);
       if (albumId <= 0) continue;
       const album = getAlbumById(albumId);
-      if (!album) continue;
+      if (!album) {
+        if (event.payload?.includeNew) {
+          albums.value.push(updatedAlbum);
+          if (updatedAlbum.cover_file_id) await loadAlbumCover(albumId, updatedAlbum.cover_file_id);
+        }
+        continue;
+      }
 
       if (updatedAlbum.path && album.path !== updatedAlbum.path) {
         if (albumId === selectedAlbumId && isWithinRootPath(selectedFolderPath, album.path)) {

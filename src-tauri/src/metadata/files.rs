@@ -105,9 +105,55 @@ fn directory_stamp(path: &Path) -> Option<DirectoryStamp> {
     })
 }
 
+// NTFS can give two directory mutations the same timestamp. Subscribe before reading the
+// directory so a new shared owner or XMP is visible to the next command in a transfer batch.
+#[cfg(windows)]
+mod directory_notifications {
+    use std::path::Path;
+    use windows::{
+        Win32::{
+            Foundation::{HANDLE, WAIT_TIMEOUT},
+            Storage::FileSystem::{
+                FILE_NOTIFY_CHANGE_FILE_NAME, FindCloseChangeNotification,
+                FindFirstChangeNotificationW,
+            },
+            System::Threading::WaitForSingleObject,
+        },
+        core::HSTRING,
+    };
+
+    pub(super) struct Changes(isize);
+    impl Changes {
+        pub(super) fn watch(path: &Path) -> Option<Self> {
+            let handle = unsafe {
+                FindFirstChangeNotificationW(
+                    &HSTRING::from(path.as_os_str()), false, FILE_NOTIFY_CHANGE_FILE_NAME,
+                )
+            }
+            .ok()?;
+            Some(Self(handle.0 as isize))
+        }
+        fn handle(&self) -> HANDLE {
+            HANDLE(self.0 as _)
+        }
+        pub(super) fn changed(&self) -> bool {
+            unsafe { WaitForSingleObject(self.handle(), 0) != WAIT_TIMEOUT }
+        }
+    }
+    impl Drop for Changes {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = FindCloseChangeNotification(self.handle());
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct Directory {
     stamp: Option<DirectoryStamp>,
+    #[cfg(windows)]
+    changes: Option<directory_notifications::Changes>,
     sidecars: HashMap<OsString, Vec<PathBuf>>,
     owners: HashMap<OsString, Vec<PathBuf>>,
 }
@@ -118,6 +164,8 @@ impl Directory {
         // Capture before enumeration so a concurrent entry change is detected
         // by the next lookup rather than stamped as already indexed.
         let mut index = Self {
+            #[cfg(windows)]
+            changes: directory_notifications::Changes::watch(parent),
             stamp: directory_stamp(parent),
             ..Default::default()
         };
@@ -163,6 +211,22 @@ impl Directory {
         }
         Ok(index)
     }
+    fn stale(&self, current: &Option<DirectoryStamp>) -> bool {
+        #[cfg(windows)]
+        if self.changes.as_ref().is_none_or(|watch| watch.changed()) {
+            return true;
+        }
+        current.is_none() || &self.stamp != current
+    }
+    fn record_directory_change(&mut self, path: &Path) {
+        #[cfg(windows)]
+        {
+            // One copy can create a staging file and rename it before we record the result.
+            // Start a fresh subscription after accounting for those entries.
+            self.changes = directory_notifications::Changes::watch(path);
+        }
+        self.stamp = directory_stamp(path);
+    }
     fn associated(&self, media: &Path) -> Vec<PathBuf> {
         let mut paths = Vec::new();
         for base in [media.file_name(), media.file_stem()].into_iter().flatten() {
@@ -189,7 +253,7 @@ impl Cache {
         if self
             .directories
             .get(folder)
-            .is_none_or(|index| stamp.is_none() || index.stamp != stamp)
+            .is_none_or(|index| index.stale(&stamp))
         {
             self.directories
                 .insert(folder.to_path_buf(), Directory::read(folder)?);
@@ -234,7 +298,7 @@ impl Cache {
                     }
                 }
             }
-            directory.stamp = directory_stamp(parent(media));
+            directory.record_directory_change(parent(media));
         }
     }
     fn update(&mut self, paths: &[PathBuf]) {
@@ -278,7 +342,7 @@ impl Cache {
         let folders: HashSet<_> = paths.iter().map(|path| parent(path)).collect();
         for folder in folders {
             if let Some(directory) = self.directories.get_mut(folder) {
-                directory.stamp = directory_stamp(folder);
+                directory.record_directory_change(folder);
             }
         }
     }

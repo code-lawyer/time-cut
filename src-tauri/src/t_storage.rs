@@ -128,6 +128,16 @@ fn checkpoint_db(path: &Path) -> Result<(), String> {
         .try_exists()
         .map_err(|e| format!("Failed to inspect database '{}': {}", path.display(), e))?
     {
+        // Windows reports "path not found" for a file used as an intermediate directory.
+        // Only skip an absent database beneath a valid directory tree.
+        for ancestor in path.ancestors().skip(1) {
+            match fs::metadata(ancestor) {
+                Ok(meta) if meta.is_dir() => break,
+                Ok(_) => return Err(format!("Database parent is not a directory: {}", ancestor.display())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("Failed to inspect '{}': {}", ancestor.display(), e)),
+            }
+        }
         return Ok(());
     }
 
@@ -597,6 +607,19 @@ mod migration_tests {
 
     #[test]
     fn migration_waits_for_connections_and_reopens_admission() {
+        // The admission gate covers the whole process, including unrelated catalog tests.
+        const CHILD: &str = "TIMECUT_TEST_MIGRATION_PROCESS";
+        if std::env::var_os(CHILD).is_none() {
+            let thread = std::thread::current();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", thread.name().unwrap()])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr));
+            return;
+        }
         let lease = DbConnectionLease::acquire().unwrap();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();

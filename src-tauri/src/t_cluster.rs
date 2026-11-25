@@ -1,301 +1,324 @@
-use crate::t_common;
-use crate::t_sqlite::{Face, Person};
-use rand::seq::SliceRandom;
-use std::collections::HashMap;
+use crate::{
+    t_cmds::with_current_library,
+    t_sqlite::{self, Face, Person},
+};
+use hnsw_rs::prelude::{DistCosine, Hnsw};
+use rusqlite::{Connection, params};
+use std::collections::{BTreeMap, HashSet};
 
-/// Clustering progress information
 #[derive(Clone, serde::Serialize)]
 pub struct ClusterProgress {
-    pub phase: String, // "graph", "iterate", "converged", "assign", "thumbnail"
+    pub phase: &'static str,
     pub current: usize,
     pub total: usize,
 }
 
-/// Calculate cosine distance between two PRE-PARSED embeddings
-/// Distance = 1.0 - Cosine Similarity
-/// NOTE: Assumes input vectors are already normalized!
-fn cosine_distance(emb1: &[f32], emb2: &[f32]) -> f32 {
-    // Dot product of normalized vectors = cosine similarity
-    let dot_product: f32 = emb1.iter().zip(emb2.iter()).map(|(x, y)| x * y).sum();
+const EMBEDDING_SIZE: usize = 128;
+pub(crate) const EMBEDDING_BYTES: i64 = (EMBEDDING_SIZE * std::mem::size_of::<f32>()) as i64;
+const EXAMPLES_PER_PERSON: usize = 4;
+const MATCH_MARGIN: f32 = 0.045;
+const NEAREST_EXAMPLES: usize = 48;
 
-    // Clamp similarity to [-1.0, 1.0] to handle floating point errors
-    let similarity = dot_product.clamp(-1.0, 1.0);
-    1.0 - similarity
+type Embedding = [f32; EMBEDDING_SIZE];
+
+struct Point {
+    id: i64,
+    file: i64,
+    person: Option<i64>,
+    embedding: Embedding,
 }
 
-/// Helper: Parse raw byte embedding to normalized f32 vector
-fn parse_embedding(bytes: &[u8]) -> Option<Vec<f32>> {
-    // Embedding bytes should be tightly packed f32 values.
-    // If not, skip this embedding instead of panicking.
-    if bytes.is_empty() || bytes.len() % 4 != 0 {
+#[derive(Default)]
+struct Group {
+    person: Option<i64>,
+    files: HashSet<i64>,
+    examples: Vec<Embedding>,
+    pending: Vec<(i64, i64)>,
+}
+
+impl Group {
+    fn add_example(&mut self, file: i64, embedding: Embedding) -> bool {
+        self.files.insert(file);
+        if self.examples.len() < EXAMPLES_PER_PERSON {
+            self.examples.push(embedding);
+            return true;
+        }
+        false
+    }
+
+    fn score(&self, point: &Point) -> f32 {
+        if self.files.contains(&point.file) {
+            return -1.0;
+        }
+        self.examples
+            .iter()
+            .map(|example| {
+                example
+                    .iter()
+                    .zip(point.embedding.iter())
+                    .map(|(a, b)| a * b)
+                    .sum::<f32>()
+            })
+            .fold(-1.0, f32::max)
+    }
+}
+
+fn embedding(bytes: &[u8]) -> Option<Embedding> {
+    if bytes.len() as i64 != EMBEDDING_BYTES {
+        // Preserve existing people using older embeddings. Their features can't be
+        // compared with the bundled SFace model.
         return None;
     }
-    let emb_vec: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|chunk| {
-            let arr = [chunk[0], chunk[1], chunk[2], chunk[3]];
-            f32::from_le_bytes(arr)
-        })
-        .collect();
+    let mut values = [0.0; EMBEDDING_SIZE];
+    for (v, chunk) in values.iter_mut().zip(bytes.chunks_exact(4)) {
+        *v = f32::from_le_bytes(chunk.try_into().ok()?);
+    }
+    let magnitude = values.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if !magnitude.is_finite() || magnitude <= f32::EPSILON {
+        return None;
+    }
+    for value in &mut values {
+        *value /= magnitude;
+    }
+    Some(values)
+}
 
-    // Normalize
-    let norm: f32 = emb_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        Some(emb_vec.iter().map(|x| x / norm).collect())
+fn read_points(conn: &Connection) -> Result<Vec<Point>, String> {
+    let mut query = conn
+        .prepare(&format!(
+            "SELECT f.id, f.file_id, p.id, f.embedding FROM faces f
+         JOIN afiles a ON a.id=f.file_id JOIN afolders b ON a.folder_id=b.id
+         LEFT JOIN persons p ON p.id=f.person_id
+         WHERE {} AND length(f.embedding)=?1 AND NOT EXISTS
+             (SELECT 1 FROM face_group_exclusions e WHERE e.face_id=f.id)
+         ORDER BY f.id",
+            Face::visible_images(),
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = query
+        .query_map([EMBEDDING_BYTES], |row| {
+            let id = row.get(0)?;
+            let file = row.get(1)?;
+            let person = row.get(2)?;
+            let bytes: Vec<u8> = row.get(3)?;
+            Ok(embedding(&bytes).map(|embedding| Point {
+                id,
+                file,
+                person,
+                embedding,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.filter_map(|row| row.transpose())
+        .collect::<rusqlite::Result<_>>()
+        .map_err(|e| e.to_string())
+}
+
+fn best_group(
+    groups: &[Group],
+    candidates: impl IntoIterator<Item = usize>,
+    point: &Point,
+    minimum: f32,
+) -> Option<usize> {
+    let mut best = (None, -1.0);
+    let mut second = -1.0;
+    for index in candidates {
+        let score = groups[index].score(point);
+        if score > best.1 {
+            second = best.1;
+            best = (Some(index), score);
+        } else {
+            second = second.max(score);
+        }
+    }
+    if best.1 >= minimum && best.1 - second >= MATCH_MARGIN {
+        best.0
     } else {
         None
     }
 }
 
-/// Edge in the similarity graph
-#[derive(Clone)]
-struct Edge {
-    to: usize,   // Target node index
-    weight: f32, // Edge weight (similarity = 1 - distance)
-}
-
-/// Insert edge into candidate list, maintaining at most max_edges entries sorted by weight descending.
-/// If list is full and new weight is smaller than the smallest, it is dropped.
-fn insert_top_k(candidates: &mut Vec<(usize, f32)>, edge: (usize, f32), max_edges: usize) {
-    if candidates.len() < max_edges {
-        candidates.push(edge);
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    } else {
-        // Find the smallest weight (last element after sort)
-        if let Some(&(_, min_weight)) = candidates.last() {
-            if edge.1 > min_weight {
-                candidates.pop();
-                candidates.push(edge);
-                candidates
-                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            }
+fn plan(
+    points: Vec<Point>,
+    minimum: f32,
+    mut progress: impl FnMut(ClusterProgress),
+    cancelled: impl Fn() -> bool,
+) -> Option<Vec<Group>> {
+    let index = Hnsw::<f32, DistCosine>::new(16, points.len().max(1), 16, 120, DistCosine {});
+    let mut representative_groups = Vec::new();
+    let mut groups = BTreeMap::<i64, Group>::new();
+    let mut unassigned = Vec::new();
+    for point in points {
+        if let Some(id) = point.person {
+            groups
+                .entry(id)
+                .or_insert_with(|| Group {
+                    person: Some(id),
+                    ..Default::default()
+                })
+                .add_example(point.file, point.embedding);
+        } else {
+            unassigned.push(point);
         }
     }
+    let mut groups: Vec<_> = groups.into_values().collect();
+    for (group_id, group) in groups.iter().enumerate() {
+        if cancelled() {
+            return None;
+        }
+        for example in &group.examples {
+            index.insert((example, representative_groups.len()));
+            representative_groups.push(group_id);
+        }
+    }
+    let total = unassigned.len();
+    for (current, point) in unassigned.into_iter().enumerate() {
+        if cancelled() {
+            return None;
+        }
+        if current % 50 == 0 || current + 1 == total {
+            progress(ClusterProgress {
+                phase: "assign",
+                current: current + 1,
+                total,
+            });
+        }
+        let matched = if groups.len() <= NEAREST_EXAMPLES {
+            best_group(&groups, 0..groups.len(), &point, minimum)
+        } else {
+            let mut candidates: Vec<_> = index
+                .search(&point.embedding, NEAREST_EXAMPLES, 96)
+                .into_iter()
+                .map(|neighbor| representative_groups[neighbor.d_id])
+                .collect();
+            candidates.sort_unstable();
+            candidates.dedup();
+            best_group(&groups, candidates, &point, minimum)
+        };
+        let group_id = matched.unwrap_or_else(|| {
+            groups.push(Group::default());
+            groups.len() - 1
+        });
+        let group = &mut groups[group_id];
+        if group.add_example(point.file, point.embedding) {
+            index.insert((&point.embedding, representative_groups.len()));
+            representative_groups.push(group_id);
+        }
+        group.pending.push((point.id, point.file));
+    }
+    Some(groups)
 }
 
-/// Run Chinese Whispers clustering on ALL faces
-///
-/// Memory-optimized:
-/// 1. Uses slim face data (id, file_id, embedding_bytes) instead of full Face structs
-/// 2. Prunes candidate edges to Top-K during build (not after), bounding memory at N * K_NEIGHBORS
-/// 3. Pre-parses all embeddings once to avoid allocations in inner loop
+fn save_groups(conn: &Connection, groups: Vec<Group>) -> rusqlite::Result<Vec<i64>> {
+    let tx = conn.unchecked_transaction()?;
+    let mut created = Vec::new();
+    for group in groups.into_iter().filter(|group| !group.pending.is_empty()) {
+        let (id, new) = if let Some(id) = group.person {
+            (id, false)
+        } else {
+            tx.execute("INSERT INTO persons(created_at) VALUES (unixepoch())", [])?;
+            (tx.last_insert_rowid(), true)
+        };
+        let mut changes = 0;
+        for (face, file) in group.pending {
+            // Honor edits and removals made since the snapshot was taken.
+            changes += tx.execute(
+                "UPDATE faces SET person_id=?1
+                 WHERE id=?2 AND file_id=?3 AND person_id IS NULL
+                   AND EXISTS(SELECT 1 FROM persons WHERE id=?1)
+                   AND NOT EXISTS(SELECT 1 FROM face_group_exclusions WHERE face_id=?2)
+                   AND NOT EXISTS(SELECT 1 FROM faces WHERE file_id=?3 AND person_id=?1)",
+                params![id, face, file],
+            )?;
+        }
+        if new && changes > 0 {
+            created.push(id);
+        } else if new {
+            tx.execute("DELETE FROM persons WHERE id=?1", [id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(created)
+}
+
+/// Add new faces to the library's existing person albums. Names and manual
+/// corrections survive subsequent imports, cancellation and library switches.
 pub fn cluster_faces<F, C>(
-    threshold: f32,
-    mut progress_fn: F,
-    is_cancelled_fn: C,
+    library: &str,
+    max_distance: f32,
+    mut progress: F,
+    cancelled: C,
 ) -> Result<usize, String>
 where
     F: FnMut(ClusterProgress),
     C: Fn() -> bool,
 {
-    const K_NEIGHBORS: usize = t_common::K_NEIGHBORS;
-
-    // 1. Reset all existing assignments and delete persons
-    Face::reset_all_assignments()?;
-
-    // 2. Get ALL faces for clustering — slim: (face_id, file_id, embedding_bytes)
-    let mut slim_faces = Face::get_all_for_clustering()?;
-    let n = slim_faces.len();
-    if n == 0 {
+    let points = with_current_library(library, || {
+        let db = t_sqlite::open_conn()?;
+        read_points(&db)
+    })?;
+    if points.iter().all(|point| point.person.is_some()) {
         return Ok(0);
     }
-
-    // 3. Pre-parse embeddings (do this once)
-    let mut parsed_embeddings: Vec<Option<Vec<f32>>> = Vec::with_capacity(n);
-    for (_id, _file_id, embedding_bytes) in &mut slim_faces {
-        parsed_embeddings.push(embedding_bytes.as_deref().and_then(parse_embedding));
-        embedding_bytes.take();
+    let minimum = 1.0 - max_distance.clamp(0.15, 0.65);
+    let Some(groups) = plan(points, minimum, &mut progress, &cancelled) else {
+        return Ok(0);
+    };
+    if cancelled() {
+        return Ok(0);
     }
-
-    // 4. Build K-NN Graph with early Top-K pruning
-    //    candidate_lists memory is bounded at N * K_NEIGHBORS entries
-    let mut candidate_lists: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n];
-    let total_pairs = n.saturating_mul(n.saturating_sub(1)) / 2;
-    let mut pairs_done: usize = 0;
-    let mut last_pct = 0;
-
-    for i in 0..n {
-        // Check for cancellation
-        if is_cancelled_fn() {
-            return Ok(0);
-        }
-
-        if let Some(emb_i) = &parsed_embeddings[i] {
-            for j in (i + 1)..n {
-                if let Some(emb_j) = &parsed_embeddings[j] {
-                    // Faces in the same file cannot be edges (prevents merging distinct people in same photo)
-                    if slim_faces[i].1 == slim_faces[j].1 {
-                        pairs_done += 1;
-                        continue;
-                    }
-
-                    let dist = cosine_distance(emb_i, emb_j);
-
-                    if dist < threshold {
-                        let weight = 1.0 - dist;
-                        // Square weight to punish weak links further
-                        let adjusted_weight = weight * weight;
-
-                        insert_top_k(&mut candidate_lists[i], (j, adjusted_weight), K_NEIGHBORS);
-                        insert_top_k(&mut candidate_lists[j], (i, adjusted_weight), K_NEIGHBORS);
-                    }
-                }
-                pairs_done += 1;
-            }
-        } else {
-            pairs_done += n.saturating_sub(i + 1);
-        }
-
-        // Report progress every 5%
-        let current_pct = if total_pairs > 0 {
-            pairs_done * 100 / total_pairs
-        } else {
-            100
-        };
-        if current_pct >= last_pct + 5 || pairs_done == total_pairs {
-            progress_fn(ClusterProgress {
-                phase: "graph".to_string(),
-                current: current_pct,
-                total: 100,
-            });
-            last_pct = current_pct;
-        }
-    }
-
-    // 5. Build final graph from pruned candidate lists (edges already Top-K)
-    let mut graph: Vec<Vec<Edge>> = vec![Vec::new(); n];
-
-    for (i, candidates) in candidate_lists.iter().enumerate() {
-        for &(to, weight) in candidates {
-            graph[i].push(Edge { to, weight });
-        }
-    }
-
-    // Free graph-building allocations before Chinese Whispers
-    drop(candidate_lists);
-    drop(parsed_embeddings);
-
-    // 6. Run Chinese Whispers Algorithm
-    let mut labels: Vec<usize> = (0..n).collect();
-    let mut order: Vec<usize> = (0..n).collect();
-    let mut rng = rand::thread_rng();
-    let max_iterations = 20;
-
-    for iter in 0..max_iterations {
-        // Check for cancellation
-        if is_cancelled_fn() {
-            return Ok(0);
-        }
-
-        let mut changed = false;
-
-        progress_fn(ClusterProgress {
-            phase: "iterate".to_string(),
-            current: iter + 1,
-            total: max_iterations,
-        });
-
-        order.shuffle(&mut rng);
-
-        for &node in &order {
-            if graph[node].is_empty() {
-                continue;
-            }
-
-            // Count weighted votes
-            let mut label_weights: HashMap<usize, f32> = HashMap::new();
-            for edge in &graph[node] {
-                let neighbor_label = labels[edge.to];
-                *label_weights.entry(neighbor_label).or_insert(0.0) += edge.weight;
-            }
-
-            // Find best label
-            let best_label = label_weights
-                .into_iter()
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-                .map(|(label, _)| label)
-                .unwrap_or(labels[node]);
-
-            if labels[node] != best_label {
-                labels[node] = best_label;
-                changed = true;
-            }
-        }
-
-        if !changed {
-            progress_fn(ClusterProgress {
-                phase: "converged".to_string(),
-                current: iter + 1,
-                total: max_iterations,
-            });
+    let new_ids = with_current_library(library, || {
+        let db = t_sqlite::open_conn()?;
+        save_groups(&db, groups).map_err(|e| e.to_string())
+    })?;
+    for (i, id) in new_ids.iter().enumerate() {
+        if cancelled() {
             break;
         }
-    }
-
-    // Check for cancellation before assignment
-    if is_cancelled_fn() {
-        return Ok(0);
-    }
-
-    // 6. Collect clusters
-    let mut cluster_map: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, &label) in labels.iter().enumerate() {
-        // if !graph[i].is_empty() {
-        cluster_map.entry(label).or_default().push(i);
-        // }
-    }
-    drop(graph);
-    drop(labels);
-    drop(order);
-
-    // 7. Filter clusters
-    const MIN_SAMPLES: usize = t_common::MIN_SAMPLES;
-    let valid_clusters: Vec<_> = cluster_map
-        .into_iter()
-        .filter(|(_, face_indices)| face_indices.len() >= MIN_SAMPLES)
-        .collect();
-
-    let total_clusters = valid_clusters.len();
-
-    // 8. Assign faces to persons
-    let mut total_assigned = 0;
-
-    for (cluster_idx, (_, cluster_face_indices)) in valid_clusters.into_iter().enumerate() {
-        if is_cancelled_fn() {
-            return Ok(total_assigned);
-        }
-
-        progress_fn(ClusterProgress {
-            phase: "assign".to_string(),
-            current: cluster_idx + 1,
-            total: total_clusters,
+        progress(ClusterProgress {
+            phase: "thumbnail",
+            current: i + 1,
+            total: new_ids.len(),
         });
+        // Missing originals, offline volumes and library changes don't affect the grouping.
+        let _ = with_current_library(library, || Person::update_thumbnail(*id));
+    }
+    Ok(new_ids.len())
+}
 
-        let person_name = format!("Person {}", cluster_idx + 1);
-        let person_id = Person::create(Some(&person_name))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        for face_idx in cluster_face_indices {
-            Face::assign_to_person(slim_faces[face_idx].0, person_id)?;
-            total_assigned += 1;
+    fn point(id: i64, file: i64, person: Option<i64>, axis: usize) -> Point {
+        let mut embedding = [0.0; EMBEDDING_SIZE];
+        embedding[axis] = 1.0;
+        Point {
+            id,
+            file,
+            person,
+            embedding,
         }
     }
 
-    drop(slim_faces);
-
-    // 9. Generate thumbnails
-    progress_fn(ClusterProgress {
-        phase: "thumbnail".to_string(),
-        current: 0,
-        total: total_clusters,
-    });
-
-    Person::update_all_thumbnails()?;
-
-    progress_fn(ClusterProgress {
-        phase: "thumbnail".to_string(),
-        current: total_clusters,
-        total: total_clusters,
-    });
-
-    Ok(total_assigned)
+    #[test]
+    fn auto_grouping_preserves_an_existing_person_and_avoids_same_photo_collisions() {
+        let groups = plan(
+            vec![
+                point(1, 10, Some(7), 0),
+                point(2, 11, None, 0),
+                point(3, 11, None, 0),
+                point(4, 12, None, 63),
+            ],
+            0.58,
+            |_| {},
+            || false,
+        )
+        .unwrap();
+        assert_eq!(groups[0].person, Some(7));
+        assert_eq!(groups[0].pending, [(2, 11)]);
+        assert_eq!(groups[1].pending, [(3, 11)]);
+        assert_eq!(groups[2].pending, [(4, 12)]);
+        assert!(plan(vec![point(1, 1, None, 0)], 0.58, |_| {}, || true).is_none());
+    }
 }

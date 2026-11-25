@@ -3,6 +3,7 @@ import { check, type Update, type DownloadEvent } from '@tauri-apps/plugin-updat
 import { relaunch } from '@tauri-apps/plugin-process';
 import { openExternalUrl } from '@/common/api';
 import { useToast, type ToastPlacement } from '@/common/toast';
+import { i18n } from '@/common/i18n';
 
 const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000;
 const UPDATE_CHECK_KEY = 'lap_last_update_check';
@@ -191,6 +192,10 @@ export function useAppUpdater(localeMsg: Ref<any>, options: AppUpdaterOptions = 
   }
 
   async function checkForUpdates(manual = false) {
+    if (import.meta.env.VITE_TIMECUT_UPDATER !== '1') {
+      if (manual && !silent) toast.info(i18n.global.t('timecut.updateNotice'), { placement: toastPlacement });
+      return;
+    }
     if (isCheckingUpdate.value || isInstallingUpdate.value) return;
 
     if (!manual) {

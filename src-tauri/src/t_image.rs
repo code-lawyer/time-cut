@@ -644,6 +644,23 @@ pub fn get_image_thumbnail(
     get_image_thumbnail_with_encoding(file_path, orientation, thumbnail_size, false)
 }
 
+/// Render the same display-oriented image that the gallery uses, including
+/// formats that the ordinary image decoder cannot open.
+pub(crate) fn analysis_thumbnail(
+    path: &str,
+    file_type: i64,
+    orientation: i32,
+    size: u32,
+) -> Result<Option<Vec<u8>>, String> {
+    match file_type {
+        1 if is_heic_path(path) => crate::t_heif::get_heif_thumbnail(path, orientation, size),
+        1 => get_image_thumbnail_with_encoding(path, orientation, size, true),
+        2 => crate::t_video::get_video_thumbnail_sync(path, size, None, Some(25)),
+        3 => get_raw_thumbnail(path, orientation, size, RawDisplayOptions::rendered_bright()),
+        _ => Ok(None),
+    }
+}
+
 pub(crate) fn get_image_thumbnail_with_encoding(
     file_path: &str,
     orientation: i32,

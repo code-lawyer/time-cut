@@ -2393,13 +2393,20 @@ mod import_tests {
         let image = dir.join("photo.RAF");
         {
             let _scan = sidecar_scan(101);
+            let revision = SIDECAR_REVISION.load(Ordering::Acquire);
             assert!(find_xmp_sidecar(&image).is_none());
             fs::write(dir.join("photo.Xmp"), "").unwrap();
-            assert!(find_xmp_sidecar(&image).is_none());
+            let same_scan = find_xmp_sidecar(&image);
+            // An import on another thread may explicitly invalidate this index.
+            // A stable revision must continue to reuse this scan's cached miss.
+            if SIDECAR_REVISION.load(Ordering::Acquire) == revision {
+                assert!(same_scan.is_none());
+            }
         }
         {
             let _scan = sidecar_scan(102);
             assert!(find_xmp_sidecar(&image).is_some());
+            assert_eq!(INDEX.with(|index| index.borrow().as_ref().map(|entry| entry.0)), Some(102));
         }
         fs::remove_dir_all(dir).unwrap();
     }

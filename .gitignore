@@ -1,4 +1,6 @@
 .worktrees/
+.timecut-build/
+release-test/
 .vscode/
 .workbuddy/
 .continue/

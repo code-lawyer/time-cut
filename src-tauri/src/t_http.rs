@@ -127,8 +127,19 @@ async fn handle_connection(
     route: &str,
     is_allowed: impl FnOnce(&std::path::Path) -> bool + Send + 'static,
 ) -> io::Result<()> {
+    serve_request(&mut stream, route, is_allowed).await?;
+    // Signal EOF after the response. Dropping the Windows socket directly can
+    // report a reset to the reader even after the complete body has arrived.
+    stream.shutdown().await
+}
+
+async fn serve_request(
+    stream: &mut TcpStream,
+    route: &str,
+    is_allowed: impl FnOnce(&std::path::Path) -> bool + Send + 'static,
+) -> io::Result<()> {
     let Ok(Ok(Some(request))) =
-        tokio::time::timeout(std::time::Duration::from_secs(5), read_request(&mut stream)).await
+        tokio::time::timeout(std::time::Duration::from_secs(5), read_request(stream)).await
     else {
         return Ok(());
     };
@@ -142,7 +153,7 @@ async fn handle_connection(
         .next()
         .unwrap_or_default();
     let Some(encoded) = target.strip_prefix(route) else {
-        return reject(&mut stream, "404 Not Found").await;
+        return reject(stream, "404 Not Found").await;
     };
     let origin = lines
         .clone()
@@ -160,7 +171,7 @@ async fn handle_connection(
             "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost" | "null"
         ) || (cfg!(debug_assertions) && origin == "http://localhost:3580");
         if !trusted {
-            return reject(&mut stream, "403 Forbidden").await;
+            return reject(stream, "403 Forbidden").await;
         }
         cors.push(("Access-Control-Allow-Origin", origin.into()));
     }
@@ -170,16 +181,16 @@ async fn handle_connection(
             ("Access-Control-Allow-Headers", "Range".into()),
             ("Content-Length", "0".into()),
         ]);
-        return write_headers(&mut stream, "204 No Content", &cors).await;
+        return write_headers(stream, "204 No Content", &cors).await;
     }
     if method != "GET" && method != "HEAD" {
-        return reject(&mut stream, "405 Method Not Allowed").await;
+        return reject(stream, "405 Method Not Allowed").await;
     }
     let Ok(path) = percent_encoding::percent_decode_str(encoded).decode_utf8() else {
-        return reject(&mut stream, "400 Bad Request").await;
+        return reject(stream, "400 Bad Request").await;
     };
     let Ok(path) = tauri::path::SafePathBuf::new(std::path::PathBuf::from(path.as_ref())) else {
-        return reject(&mut stream, "403 Forbidden").await;
+        return reject(stream, "403 Forbidden").await;
     };
     let opened = tokio::task::spawn_blocking(move || {
         let path = path.as_ref();
@@ -199,8 +210,8 @@ async fn handle_connection(
     .await;
     let (mut file, path) = match opened {
         Ok(Ok(opened)) => opened,
-        Ok(Err(status)) => return reject(&mut stream, status).await,
-        Err(_) => return reject(&mut stream, "500 Internal Server Error").await,
+        Ok(Err(status)) => return reject(stream, status).await,
+        Err(_) => return reject(stream, "500 Internal Server Error").await,
     };
     let file_size = file.metadata().await?.len();
     let range = lines.take_while(|line| !line.is_empty()).find_map(|line| {
@@ -220,7 +231,7 @@ async fn handle_connection(
         let Some((start, end)) = parse_http_range(range, file_size) else {
             headers.push(("Content-Range", format!("bytes */{file_size}")));
             headers.push(("Content-Length", "0".into()));
-            return write_headers(&mut stream, "416 Range Not Satisfiable", &headers).await;
+            return write_headers(stream, "416 Range Not Satisfiable", &headers).await;
         };
         headers.push(("Content-Range", format!("bytes {start}-{end}/{file_size}")));
         ("206 Partial Content", start, end - start + 1)
@@ -250,11 +261,11 @@ async fn handle_connection(
     if method != "HEAD" {
         file.seek(SeekFrom::Start(offset)).await?;
     }
-    write_headers(&mut stream, status, &headers).await?;
+    write_headers(stream, status, &headers).await?;
     if method != "HEAD" && length > 0 {
         let capacity = length.min(128 * 1024) as usize;
         let mut body = tokio::io::BufReader::with_capacity(capacity, file.take(length));
-        tokio::io::copy_buf(&mut body, &mut stream).await?;
+        tokio::io::copy_buf(&mut body, stream).await?;
     }
     Ok(())
 }
@@ -298,8 +309,11 @@ mod tests {
                 .await
                 .unwrap();
             let mut response = Vec::new();
-            client.read_to_end(&mut response).await.unwrap();
-            serve.await.unwrap().unwrap();
+            let read = client.read_to_end(&mut response).await;
+            let served = serve.await.unwrap();
+            assert!(read.is_ok() && served.is_ok(),
+                "{method} {target} {range:?}: client={read:?}, server={served:?}, response={} bytes",
+                response.len());
             let separator = response
                 .windows(4)
                 .position(|chunk| chunk == b"\r\n\r\n")

@@ -2141,6 +2141,8 @@ pub struct QueryParams {
     pub model: String,
     pub lens_make: String,
     pub lens_model: String,
+    #[serde(default)]
+    pub location_cc: Option<String>,
     pub location_admin1: String,
     pub location_name: String,
     pub is_favorite: bool,
@@ -2150,6 +2152,8 @@ pub struct QueryParams {
     pub tag_id: i64,
     #[serde(default)]
     pub person_id: i64,
+    #[serde(default)]
+    pub scene_category: Option<String>,
     // GPS bounding box filter (e.g. for "photos in this map area")
     #[serde(default)]
     pub gps_min_lat: Option<f64>,
@@ -2352,7 +2356,7 @@ impl AFile {
 
     /// Exclude files whose folder path is the excluded folder itself or one of its children.
     /// The caller must pass the alias for the file's joined afolders row.
-    fn search_exclusion_condition(folder_alias: &str) -> String {
+    pub(crate) fn search_exclusion_condition(folder_alias: &str) -> String {
         let sep = std::path::MAIN_SEPARATOR.to_string().replace('\'', "''");
         format!(
             "(CASE
@@ -2786,6 +2790,9 @@ impl AFile {
             gps_altitude = gps_altitude.or(deep.altitude);
         }
 
+        if taken_date == Some(0) && e_date_time.is_none() && crate::ingest::is_undated(Path::new(file_path)) {
+            taken_date = None;
+        }
         let (geo_name, geo_admin1, geo_admin2, geo_cc) = Self::geocode(gps_latitude, gps_longitude);
 
         // RAW and TIFF dimensions already match their decoder output.
@@ -3258,7 +3265,21 @@ impl AFile {
     /// update a file into db
     fn update(file_id: i64, file: &Self, import_xmp: bool) -> Result<usize, String> {
         let mut conn = open_conn()?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let changed_content: bool = tx.query_row(
+            "SELECT size IS NOT ?2 OR modified_at IS NOT ?3
+              OR (inode IS NOT NULL AND ?4 IS NOT NULL AND inode IS NOT ?4)
+             FROM afiles WHERE id=?1",
+            params![file_id, file.size, file.modified_at, file.inode], |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?.unwrap_or(false);
+        if changed_content {
+            tx.execute("UPDATE persons SET thumbnail=NULL WHERE id IN
+              (SELECT person_id FROM faces WHERE file_id=?1)", [file_id]).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM faces WHERE file_id=?1", [file_id]).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM athumbs WHERE file_id=?1", [file_id]).map_err(|e| e.to_string())?;
+            tx.execute("UPDATE afiles SET has_faces=0 WHERE id=?1", [file_id]).map_err(|e| e.to_string())?;
+        }
         let result = tx.execute(
             "UPDATE afiles SET
                 name = ?1, name_pinyin = ?2, size = ?3, file_type = ?4, format_label = ?5, created_at = ?6, modified_at = ?7, inode = ?8,
@@ -3492,7 +3513,7 @@ impl AFile {
             .to_string()
     }
 
-    fn live_photo_companion_exclusion_condition() -> String {
+    pub(crate) fn live_photo_companion_exclusion_condition() -> String {
         format!("a.id NOT IN (SELECT primary_file.live_photo_video_id FROM afiles primary_file
             WHERE primary_file.live_photo_video_id IS NOT NULL AND {})", Self::album_scan_predicate("primary_file"))
     }
@@ -4019,7 +4040,7 @@ impl AFile {
         conditions.push(Self::album_query_predicate("a"));
     }
 
-    fn album_filter_sql(alias: &str) -> String {
+    pub(crate) fn album_filter_sql(alias: &str) -> String {
         format!(" AND {}", Self::album_query_predicate(alias))
     }
 
@@ -5390,15 +5411,40 @@ impl AFile {
     pub fn delete_unseen_in_album(album_id: i64, current_scan_time: i64) -> Result<usize, String> {
         let mut conn = open_conn()?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        let query = format!("DELETE FROM afiles AS a
-            WHERE last_scan_time < ?1
-            AND folder_id IN (SELECT id FROM afolders WHERE album_id = ?2)
-            AND {}", Self::album_scan_predicate("a"));
-        let result = tx
-            .execute(&query, params![current_scan_time, album_id])
+        let result = Self::delete_confirmed_missing(&tx, album_id, current_scan_time)
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(result)
+    }
+
+    fn delete_confirmed_missing(
+        db: &Connection, album: i64, scan_time: i64,
+    ) -> rusqlite::Result<usize> {
+        let query = format!(
+            "SELECT a.id,d.path,a.name FROM afiles a JOIN afolders d ON d.id=a.folder_id
+             WHERE a.last_scan_time<?1 AND d.album_id=?2 AND {}", Self::album_scan_predicate("a")
+        );
+        let candidates = db.prepare(&query)?
+            .query_map(params![scan_time, album], |row| {
+                let folder: String = row.get(1)?;
+                let name: String = row.get(2)?;
+                Ok((row.get::<_, i64>(0)?, PathBuf::from(folder).join(name)))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut remove = db.prepare("DELETE FROM afiles WHERE id=? AND last_scan_time<?")?;
+        let mut deleted = 0;
+        for (id, path) in candidates {
+            // A decoder or a temporarily unavailable disk may prevent an existing
+            // original from being marked. Preserve its edits and face associations.
+            let original_gone = match fs::metadata(path) {
+                Ok(info) => !info.is_file(),
+                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+            };
+            if original_gone {
+                deleted += remove.execute(params![id, scan_time])?;
+            }
+        }
+        Ok(deleted)
     }
 
     /// Get a file's has_tags status
@@ -5548,6 +5594,10 @@ impl AFile {
         }
 
         if !params.location_admin1.is_empty() {
+            if let Some(country) = &params.location_cc {
+                conditions.push("COALESCE(a.geo_cc, '') = ?".to_string());
+                sql_params.push(Box::new(country.clone()));
+            }
             conditions.push("a.geo_admin1 = ?".to_string());
             sql_params.push(Box::new(params.location_admin1.clone()));
             if !params.location_name.is_empty() {
@@ -5606,6 +5656,13 @@ impl AFile {
             joins.push("INNER JOIN faces f ON a.id = f.file_id");
             conditions.push("f.person_id = ?".to_string());
             sql_params.push(Box::new(params.person_id));
+        }
+
+        if let Some(category) = &params.scene_category {
+            joins.push("LEFT JOIN timecut_scenes s ON s.file_id=a.id");
+            conditions.push("a.file_type IN (1,2,3)".to_string());
+            conditions.push(format!("{} = ?", crate::t_organize::category_expression()));
+            sql_params.push(Box::new(category.clone()));
         }
 
         conditions.push(Self::search_exclusion_condition("b"));
@@ -8450,6 +8507,12 @@ impl AThumb {
         }
     }
 
+    pub(crate) fn analysis_cached(file_id: i64, path: &str) -> Option<Vec<u8>> {
+        Self::fetch(file_id).ok().flatten()
+            .filter(|thumb| thumb.error_code == 0 && !thumb.is_stale(path))
+            .and_then(|thumb| thumb.thumb_data)
+    }
+
     fn fetch_thumb_key(file_id: i64) -> Result<Option<String>, String> {
         let conn = open_conn()?;
         conn.query_row(
@@ -9440,7 +9503,8 @@ impl Person {
 
         // 2. Get face info and file info
         let query = "
-            SELECT f.id, faces.bbox, f.width, f.height, f.e_orientation, f.name, fd.path
+            SELECT f.id, faces.bbox, f.width, f.height, f.e_orientation, f.name, fd.path,
+                   COALESCE(length(faces.embedding)=?2,0), f.file_type
             FROM faces 
             JOIN afiles f ON faces.file_id = f.id
             JOIN afolders fd ON f.folder_id = fd.id
@@ -9456,9 +9520,11 @@ impl Person {
                 Option<i32>,
                 String,
                 String,
+                bool,
+                Option<i64>,
             ),
             _,
-        > = conn.query_row(query, params![face_id], |row| {
+        > = conn.query_row(query, params![face_id, crate::t_cluster::EMBEDDING_BYTES], |row| {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
@@ -9467,10 +9533,13 @@ impl Person {
                 row.get(4)?,
                 row.get(5)?,
                 row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
             ))
         });
 
-        let (file_id, bbox_json, orig_w_opt, orig_h_opt, orientation_opt, file_name, folder_path) =
+        let (file_id, bbox_json, orig_w_opt, orig_h_opt, orientation_opt, file_name, folder_path,
+            oriented, file_type) =
             match row {
                 Ok(r) => r,
                 Err(_) => return Ok(None),
@@ -9502,28 +9571,39 @@ impl Person {
 
         // Helper to load thumbnail from cache-backed thumbnail storage
         let load_thumbnail = || -> Option<(image::DynamicImage, u32, u32)> {
-            let data = AThumb::fetch(file_id).ok()??.thumb_data?;
+            let data = AThumb::analysis_cached(file_id, &full_path.to_string_lossy())?;
             let img = image::load_from_memory(&data).ok()?;
             let (w, h) = img.dimensions();
             Some((img, w, h))
         };
 
-        let (mut img, img_w, img_h) = match load_original().or_else(load_thumbnail) {
+        let load_display = || -> Option<(image::DynamicImage, u32, u32)> {
+            let bytes = t_image::analysis_thumbnail(&full_path.to_string_lossy(), file_type?, orientation, 640).ok()??;
+            let img = image::load_from_memory(&bytes).ok()?;
+            let (w, h) = img.dimensions();
+            Some((img, w, h))
+        };
+        let source = if oriented {
+            load_thumbnail().or_else(load_display)
+        } else {
+            load_original().or_else(load_thumbnail)
+        };
+        let (mut img, img_w, img_h) = match source {
             Some(res) => res,
             None => return Ok(None),
         };
 
         // 4. Calculate Dimensions & BBox
         let (ref_w, ref_h) = if let (Some(ow), Some(oh)) = (orig_w_opt, orig_h_opt) {
-            match orientation {
-                6 | 8 => (oh, ow),
+            match (oriented, orientation) {
+                (false, 6 | 8) => (oh, ow),
                 _ => (ow, oh),
             }
         } else {
             (img_w, img_h)
         };
 
-        let transformed_bbox = if orig_w_opt.is_some() && orig_h_opt.is_some() {
+        let transformed_bbox = if !oriented && orig_w_opt.is_some() && orig_h_opt.is_some() {
             let orig_w = orig_w_opt.unwrap();
             let orig_h = orig_h_opt.unwrap();
             match orientation {
@@ -9627,34 +9707,6 @@ impl Person {
         Ok(())
     }
 
-    /// Update thumbnails for all persons (called after clustering)
-    pub fn update_all_thumbnails() -> Result<(), String> {
-        let conn = open_conn()?;
-
-        // Get all person IDs and their cover_face_ids
-        let mut stmt = conn
-            .prepare("SELECT id, cover_face_id FROM persons")
-            .map_err(|e| e.to_string())?;
-
-        let persons: Vec<(i64, Option<i64>)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-
-        // Generate and update thumbnail for each person
-        for (person_id, cover_face_id) in persons {
-            if let Ok(Some(thumbnail)) = Self::generate_thumbnail(&conn, person_id, cover_face_id) {
-                let _ = conn.execute(
-                    "UPDATE persons SET thumbnail = ?1 WHERE id = ?2",
-                    params![thumbnail, person_id],
-                );
-            }
-        }
-
-        Ok(())
-    }
-
     /// Rename a person
     pub fn rename(person_id: i64, new_name: &str) -> Result<usize, String> {
         let conn = open_conn()?;
@@ -9667,39 +9719,24 @@ impl Person {
         Ok(result)
     }
 
-    /// Delete a person (faces will have person_id set to NULL)
+    /// Hide a person and prevent those faces from being grouped again automatically.
     pub fn delete(person_id: i64) -> Result<usize, String> {
         let conn = open_conn()?;
-
-        // First, unlink all faces from this person
-        conn.execute(
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT OR IGNORE INTO face_group_exclusions(face_id) SELECT id FROM faces WHERE person_id=?1",
+            [person_id],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
             "UPDATE faces SET person_id = NULL WHERE person_id = ?1",
-            params![person_id],
+            [person_id],
         )
         .map_err(|e| e.to_string())?;
-
-        // Then delete the person
-        let result = conn
-            .execute("DELETE FROM persons WHERE id = ?1", params![person_id])
+        let result = tx
+            .execute("DELETE FROM persons WHERE id = ?1", [person_id])
             .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(result)
-    }
-
-    /// Create a new person (usually from face clustering)
-    pub fn create(name: Option<&str>) -> Result<i64, String> {
-        let conn = open_conn()?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-
-        conn.execute(
-            "INSERT INTO persons (name, created_at) VALUES (?1, ?2)",
-            params![name, now],
-        )
-        .map_err(|e| e.to_string())?;
-
-        Ok(conn.last_insert_rowid())
     }
 }
 
@@ -9709,10 +9746,21 @@ pub struct Face {
     pub id: i64,
     pub file_id: i64,
     pub bbox: String, // JSON: {"x": f32, "y": f32, "width": f32, "height": f32, "confidence": f32}
-    pub embedding: Option<Vec<u8>>, // 512-dimensional float32 embedding as bytes
+    pub embedding: Option<Vec<u8>>, // Packed float32 embedding. Older libraries may use a different model.
     pub person_id: Option<i64>,
     pub person_name: Option<String>,
     pub created_at: i64,
+}
+
+pub(crate) struct FaceTarget {
+    pub id: i64,
+    pub path: String,
+    pub width: i64,
+    pub height: i64,
+    pub modified_at: Option<i64>,
+    pub size: i64,
+    pub file_type: i64,
+    pub orientation: i32,
 }
 
 impl Face {
@@ -9820,74 +9868,47 @@ impl Face {
         Ok(faces)
     }
 
-    /// Get slim face data for clustering: (face_id, file_id, embedding_bytes)
-    /// Avoids loading full Face structs (bbox JSON, person_id, created_at) to reduce memory
-    pub fn get_all_for_clustering() -> Result<Vec<(i64, i64, Option<Vec<u8>>)>, String> {
+    pub(crate) fn visible_images() -> String {
+        format!(
+            "a.file_type IN (1,3) AND a.width>0 AND a.height>0 AND {} AND {}{}",
+            AFile::search_exclusion_condition("b"),
+            AFile::live_photo_companion_exclusion_condition(),
+            AFile::album_filter_sql("a"),
+        )
+    }
+
+    pub(crate) fn has_work() -> Result<bool, String> {
+        let conn = open_conn()?;
+        conn.query_row(&format!(
+            "SELECT EXISTS(SELECT 1 FROM afiles a JOIN afolders b ON b.id=a.folder_id
+               WHERE {} AND COALESCE(a.has_faces,0)=0)
+             OR EXISTS(SELECT 1 FROM faces f JOIN afiles a ON a.id=f.file_id JOIN afolders b ON b.id=a.folder_id
+               WHERE {} AND f.person_id IS NULL AND length(f.embedding)=?1 AND NOT EXISTS
+               (SELECT 1 FROM face_group_exclusions e WHERE e.face_id=f.id))",
+            Self::visible_images(), Self::visible_images(),
+        ), [crate::t_cluster::EMBEDDING_BYTES], |row| row.get(0)).map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn get_unprocessed_image_files() -> Result<Vec<FaceTarget>, String> {
         let conn = open_conn()?;
         let mut stmt = conn
-            .prepare("SELECT id, file_id, embedding FROM faces")
-            .map_err(|e| e.to_string())?;
-
-        let faces = stmt
-            .query_map([], |row| {
-                let id: i64 = row.get(0)?;
-                let file_id: i64 = row.get(1)?;
-                let embedding: Option<Vec<u8>> = row.get(2)?;
-                Ok((id, file_id, embedding))
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-
-        Ok(faces)
-    }
-
-    /// Reset all face assignments and delete all persons (for re-clustering)
-    pub fn reset_all_assignments() -> Result<(), String> {
-        let conn = open_conn()?;
-
-        // Clear all person_id from faces
-        conn.execute("UPDATE faces SET person_id = NULL", [])
-            .map_err(|e| e.to_string())?;
-
-        // Delete all persons
-        conn.execute("DELETE FROM persons", [])
-            .map_err(|e| e.to_string())?;
-
-        Ok(())
-    }
-
-    /// Assign a face to a person
-    pub fn assign_to_person(face_id: i64, person_id: i64) -> Result<usize, String> {
-        let conn = open_conn()?;
-        let result = conn
-            .execute(
-                "UPDATE faces SET person_id = ?1 WHERE id = ?2",
-                params![person_id, face_id],
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(result)
-    }
-
-    /// Get all image file IDs that haven't been processed for faces yet
-    /// Returns: Vec<(id, file_path, width, height)>
-    pub fn get_unprocessed_image_files() -> Result<Vec<(i64, String, i64, i64)>, String> {
-        let conn = open_conn()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT a.id, f.path || '/' || a.name as file_path, a.width, a.height
+            .prepare(&format!(
+                "SELECT a.id, b.path || '/' || a.name, a.width, a.height, a.modified_at, a.size,
+                        a.file_type, COALESCE(a.e_orientation,1)
                  FROM afiles a 
-                 JOIN afolders f ON a.folder_id = f.id
-                 WHERE a.file_type = 1 
-                   AND (a.has_faces IS NULL OR a.has_faces = 0)
-                   AND a.width IS NOT NULL AND a.height IS NOT NULL
-                 ORDER BY a.id",
-            )
+                 JOIN afolders b ON a.folder_id = b.id
+                 WHERE {} AND COALESCE(a.has_faces,0)=0
+                 ORDER BY a.id", Self::visible_images(),
+            ))
             .map_err(|e| e.to_string())?;
 
         let files = stmt
             .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                Ok(FaceTarget {
+                    id: row.get(0)?, path: row.get(1)?, width: row.get(2)?, height: row.get(3)?,
+                    modified_at: row.get(4)?, size: row.get(5)?,
+                    file_type: row.get(6)?, orientation: row.get(7)?,
+                })
             })
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
@@ -9896,85 +9917,38 @@ impl Face {
         Ok(files)
     }
 
-    /// Mark a file as scanned using an existing connection
-    pub fn mark_scanned_with_conn(
-        conn: &Connection,
-        file_id: i64,
-        status: i32,
-    ) -> Result<(), String> {
-        conn.execute(
-            "UPDATE afiles SET has_faces = ?1 WHERE id = ?2",
-            params![status, file_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// Get statistics for face indexing
-    /// Returns (processed_count, total_faces)
-    pub fn get_stats() -> Result<(usize, usize), String> {
+    /// Publish the faces and mark the exact indexed revision complete together.
+    pub(crate) fn store_detection(target: &FaceTarget, faces: &[crate::t_face::FaceData]) -> Result<bool, String> {
         let conn = open_conn()?;
-
-        // Count processed files (has_faces > 0)
-        let processed: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM afiles WHERE has_faces > 0 AND file_type = 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        // Count total faces
-        let faces: i64 = conn
-            .query_row("SELECT COUNT(*) FROM faces", [], |row| row.get(0))
-            .unwrap_or(0);
-
-        Ok((processed as usize, faces as usize))
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let changed = tx.execute(
+            "UPDATE afiles SET has_faces=?1 WHERE id=?2 AND (has_faces IS NULL OR has_faces=0)
+              AND modified_at IS ?3 AND size=?4",
+            params![if faces.is_empty() { 2 } else { 1 }, target.id, target.modified_at, target.size],
+        ).map_err(|e| e.to_string())?;
+        if changed == 0 { return Ok(false); }
+        for face in faces {
+            let bbox = serde_json::to_string(&face.bbox).map_err(|e| e.to_string())?;
+            Self::add_with_conn(&tx, target.id, &bbox, &face.embedding)?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(true)
     }
 
     /// Get full statistics for face indexing
     /// Returns (total_images, processed_images, unprocessed_images, total_faces)
     pub fn get_stats_full() -> Result<(usize, usize, usize, usize), String> {
         let conn = open_conn()?;
-        let visible_file_conditions = format!(
-            "{} AND {} AND {}",
-            AFile::album_filter_sql("a"),
-            AFile::search_exclusion_condition("b"),
-            AFile::live_photo_companion_exclusion_condition(),
-        );
-
-        let total: i64 = conn
-            .query_row(
-                &format!("SELECT COUNT(*) FROM afiles a JOIN afolders b ON b.id = a.folder_id WHERE a.file_type = 1{}", visible_file_conditions),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        let processed: i64 = conn
-            .query_row(
-                &format!("SELECT COUNT(*) FROM afiles a JOIN afolders b ON b.id = a.folder_id WHERE a.has_faces > 0 AND a.file_type = 1{}", visible_file_conditions),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        let faces: i64 = conn
-            .query_row(
-                &format!("SELECT COUNT(*) FROM faces f JOIN afiles a ON a.id = f.file_id JOIN afolders b ON b.id = a.folder_id WHERE {}", visible_file_conditions.trim_start_matches(" AND ")),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        let unprocessed = total - processed;
-
-        Ok((
-            total as usize,
-            processed as usize,
-            unprocessed as usize,
-            faces as usize,
-        ))
+        let visible = Self::visible_images();
+        let (total, processed): (usize, usize) = conn.query_row(&format!(
+            "SELECT count(*), count(*) FILTER (WHERE a.has_faces > 0)
+             FROM afiles a JOIN afolders b ON b.id=a.folder_id WHERE {visible}"
+        ), [], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|e| e.to_string())?;
+        let faces = conn.query_row(&format!(
+            "SELECT count(*) FROM faces f JOIN afiles a ON a.id=f.file_id JOIN afolders b ON b.id=a.folder_id
+             WHERE {visible} AND NOT EXISTS(SELECT 1 FROM face_group_exclusions e WHERE e.face_id=f.id)"
+        ), [], |row| row.get(0)).map_err(|e| e.to_string())?;
+        Ok((total, processed, total - processed, faces))
     }
 }
 
@@ -10282,6 +10256,63 @@ impl AGpsMapPoint {
 
 /// get connection to the db
 static CONN_POOL: Mutex<Vec<(String, Connection)>> = Mutex::new(Vec::new());
+
+// SQLite data_version is comparable only across reads on the same connection.
+// Keep this read-only handle with the pool so library moves can close it too.
+#[derive(Default)]
+struct LibraryObserver {
+    db: Option<(String, Connection)>,
+    generation: u64,
+}
+
+impl LibraryObserver {
+    fn revision(&mut self, path: &str) -> rusqlite::Result<(u64, i64)> {
+        if self.db.as_ref().is_none_or(|(previous, _)| previous != path) {
+            let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            self.db = Some((path.to_owned(), conn));
+            self.generation = self.generation.wrapping_add(1);
+        }
+        let conn = &self.db.as_ref().unwrap().1;
+        let version = conn.query_row("PRAGMA main.data_version", [], |row| row.get(0))?;
+        Ok((self.generation, version))
+    }
+}
+
+static LIBRARY_OBSERVER: Mutex<LibraryObserver> =
+    Mutex::new(LibraryObserver { db: None, generation: 0 });
+
+#[cfg(test)]
+#[test]
+fn library_observer_detects_commits_and_releases_the_handle_for_replacement() {
+    let path = std::env::temp_dir().join(format!("timecut-revision-{}.db", uuid::Uuid::new_v4()));
+    let path_str = path.to_str().unwrap();
+    let writer = Connection::open(&path).unwrap();
+    writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE changes(id)").unwrap();
+    let mut observer = LibraryObserver::default();
+    let first = observer.revision(path_str).unwrap();
+    writer.execute_batch("BEGIN; INSERT INTO changes VALUES(1)").unwrap();
+    assert_eq!(observer.revision(path_str).unwrap(), first);
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(observer.revision(path_str).unwrap(), first);
+    writer.execute("INSERT INTO changes VALUES(2)", []).unwrap();
+    let written = observer.revision(path_str).unwrap();
+    assert_ne!(written, first);
+    assert_eq!(observer.revision(path_str).unwrap(), written);
+    observer.db = None;
+    drop(writer);
+    std::fs::remove_file(&path).unwrap();
+    drop(Connection::open(&path).unwrap());
+    assert_ne!(observer.revision(path_str).unwrap().0, written.0);
+    drop(observer);
+    std::fs::remove_file(path).unwrap();
+}
+
+pub(crate) fn library_revision() -> Result<(u64, i64), String> {
+    let _lease = t_storage::DbConnectionLease::acquire()?;
+    let path = t_storage::get_current_db_path()?;
+    LIBRARY_OBSERVER.lock().map_err(|e| e.to_string())?
+        .revision(&path).map_err(|e| e.to_string())
+}
 /// Path of the library db currently known to be corrupt. Corruption state is stored per-path
 /// (not a bare bool) so `is_database_corrupted()` is always relative to the *current* library:
 /// when the current library changes (switch / remove / hide), a stale mark for another path no
@@ -10412,6 +10443,9 @@ fn create_conn() -> Result<(String, Connection), String> {
 pub(crate) fn clear_conn_pool() {
     if let Ok(mut pool) = CONN_POOL.lock() {
         pool.clear();
+    }
+    if let Ok(mut observer) = LIBRARY_OBSERVER.lock() {
+        observer.db = None;
     }
 }
 
@@ -10885,6 +10919,14 @@ fn create_db_internal() -> Result<(), String> {
         [],
     )
     .map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS face_group_exclusions (
+            face_id INTEGER PRIMARY KEY REFERENCES faces(id) ON DELETE CASCADE
+        )",
+        [],
+    ).map_err(|e| e.to_string())?;
+
+    crate::t_organize::init(&conn).map_err(|e| e.to_string())?;
 
     // file hashes table (for deduplication)
     conn.execute(
@@ -11345,6 +11387,23 @@ mod album_filter_tests {
         assert_eq!(retained, vec![(1,5),(6,5),(9,5),(11,5),(13,5),(15,5)]);
         conn.execute("UPDATE albums SET file_types=7,excluded_folders='[]',small_image_filter=0", []).unwrap();
         assert_eq!(visible(&conn), vec![1,6,9,11,13,15]);
+    }
+
+    #[test]
+    fn resumed_scan_preserves_an_unmarked_existing_original_and_its_rating() {
+        let db = fixture();
+        let folder = std::env::temp_dir().join(format!("timecut-remaining-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("present.jpg"), b"saved original").unwrap();
+        db.execute_batch("DELETE FROM afiles; ALTER TABLE afiles ADD COLUMN name TEXT;
+            INSERT INTO afiles(id,folder_id,file_type,width,height,last_scan_time,rating,name)
+            VALUES(100,1,1,1000,1000,10,4,'present.jpg'),(101,1,1,1000,1000,10,5,'removed.jpg')").unwrap();
+        db.execute("UPDATE afolders SET path=? WHERE id=1", [folder.to_string_lossy()]).unwrap();
+        db.execute("UPDATE albums SET path=? WHERE id=1", [folder.to_string_lossy()]).unwrap();
+        assert_eq!(AFile::delete_confirmed_missing(&db,1,20).unwrap(),1);
+        assert_eq!(db.query_row("SELECT id,rating FROM afiles",[], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?))).unwrap(),(100,4));
+        fs::remove_file(folder.join("present.jpg")).unwrap();
+        fs::remove_dir(folder).unwrap();
     }
 
     #[test]

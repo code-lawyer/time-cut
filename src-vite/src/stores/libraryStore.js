@@ -117,6 +117,8 @@ export const useLibraryStore = defineStore('libraryStore', {
       name: null,             // selected person name
     },
 
+    scenes: { category: null, revision: 0 },
+
     /** @type {{ searchText: string, searchHistory: (string | { text: string, count: number | null })[], searchHistoryIndex: number }} */
     search: {
       searchText: '',         // AI search text

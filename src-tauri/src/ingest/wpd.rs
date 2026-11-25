@@ -297,7 +297,68 @@ pub struct Phone {
     transfer: IPortableDeviceResources,
     fields: IPortableDeviceKeyCollection,
     identity: String,
+    album_scope: AlbumScope,
+    storage_roots: HashSet<PathBuf>,
     folders: std::cell::RefCell<resolve::Folders>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AlbumScope {
+    Apple,
+    Shared,
+    #[cfg(test)]
+    Unrestricted,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectoryLevel {
+    Device,
+    Storage,
+    Album,
+}
+
+impl AlbumScope {
+    fn is_album_root(self, name: &str) -> bool {
+        name.eq_ignore_ascii_case("DCIM")
+            || (self == Self::Shared
+                && (name.eq_ignore_ascii_case("Pictures") || name.eq_ignore_ascii_case("Movies")))
+    }
+
+    fn child(self, parent: DirectoryLevel, path: &Path, storage: bool) -> Option<DirectoryLevel> {
+        #[cfg(test)]
+        if self == Self::Unrestricted {
+            return Some(DirectoryLevel::Album);
+        }
+        let name = path.file_name()?.to_str()?;
+        if name.starts_with('.') {
+            return None;
+        }
+        match parent {
+            DirectoryLevel::Device if storage => Some(DirectoryLevel::Storage),
+            DirectoryLevel::Device | DirectoryLevel::Storage if self.is_album_root(name) => {
+                Some(DirectoryLevel::Album)
+            }
+            DirectoryLevel::Album if !storage => Some(DirectoryLevel::Album),
+            _ => None,
+        }
+    }
+
+    fn includes_media(self, parent: DirectoryLevel) -> bool {
+        #[cfg(test)]
+        if self == Self::Unrestricted {
+            return true;
+        }
+        parent == DirectoryLevel::Album
+    }
+
+    fn includes_file(self, parent: DirectoryLevel, path: &Path) -> bool {
+        #[cfg(test)]
+        if self == Self::Unrestricted {
+            return true;
+        }
+        self.includes_media(parent)
+            && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| !name.starts_with('.'))
+    }
 }
 
 impl Drop for Phone {
@@ -308,7 +369,7 @@ impl Drop for Phone {
 }
 
 enum Object {
-    Directory(PathBuf),
+    Directory { relative: PathBuf, storage: bool },
     Media(Item),
     Other,
 }
@@ -357,15 +418,27 @@ impl Phone {
                 WPD_OBJECT_DATE_CREATED,
                 WPD_OBJECT_DATE_AUTHORED,
             ])?;
-            Ok(Self {
+            let mut phone = Self {
                 device,
                 content,
                 props,
                 transfer,
                 fields,
                 identity,
+                album_scope: if info.is_apple() { AlbumScope::Apple } else { AlbumScope::Shared },
+                storage_roots: HashSet::new(),
                 folders: Default::default(),
-            })
+            };
+            // Legacy checkpoints predate the scope. Identify actual storage
+            // objects so a nested folder named "Pictures" can't impersonate one.
+            for id in phone.children("DEVICE")? {
+                if let Object::Directory { relative, storage: true } =
+                    phone.object_with_media(&id, Path::new(""), false)?
+                {
+                    phone.storage_roots.insert(relative);
+                }
+            }
+            Ok(phone)
         }
     }
 
@@ -392,8 +465,12 @@ impl Phone {
     }
 
     fn object(&self, id: &str, parent: &Path) -> Result<Object> {
+        self.object_with_media(id, parent, true)
+    }
+
+    fn object_with_media(&self, id: &str, parent: &Path, media_in_parent: bool) -> Result<Object> {
         let vals = unsafe { self.props.GetValues(&HSTRING::from(id), &self.fields)? };
-        Self::describe(&vals, id, parent, || unsafe {
+        Self::describe(&vals, id, parent, media_in_parent, || unsafe {
             self.transfer
                 .GetResourceAttributes(&HSTRING::from(id), &WPD_RESOURCE_DEFAULT)
                 .ok()?
@@ -407,12 +484,15 @@ impl Phone {
         vals: &IPortableDeviceValues,
         id: &str,
         parent: &Path,
+        media_in_parent: bool,
         fallback_size: impl FnOnce() -> Option<u64>,
     ) -> Result<Object> {
         let kind = unsafe { vals.GetGuidValue(&WPD_OBJECT_CONTENT_TYPE)? };
         let name = text_value(vals, &WPD_OBJECT_ORIGINAL_FILE_NAME)
             .or_else(|| text_value(vals, &WPD_OBJECT_NAME));
-        if name.is_none() && (kind == WPD_CONTENT_TYPE_IMAGE || kind == WPD_CONTENT_TYPE_VIDEO) {
+        if media_in_parent && name.is_none()
+            && (kind == WPD_CONTENT_TYPE_IMAGE || kind == WPD_CONTENT_TYPE_VIDEO)
+        {
             return Err("照片或视频暂未返回文件名".into());
         }
         let name = name.unwrap_or_else(|| id.to_owned());
@@ -429,9 +509,12 @@ impl Phone {
             return Ok(Object::Other);
         }
         if kind == WPD_CONTENT_TYPE_FOLDER || kind == WPD_CONTENT_TYPE_FUNCTIONAL_OBJECT {
-            return Ok(Object::Directory(relative));
+            return Ok(Object::Directory {
+                relative,
+                storage: kind == WPD_CONTENT_TYPE_FUNCTIONAL_OBJECT,
+            });
         }
-        if !media(&relative) {
+        if !media_in_parent || !media(&relative) {
             return Ok(Object::Other);
         }
         let size = unsafe {
@@ -516,7 +599,7 @@ impl Phone {
         completed: Option<&CopyOrder>,
         emit: &mut dyn FnMut(ScanEvent) -> Result<()>,
     ) -> Result<()> {
-        let mut pending = vec![("DEVICE".to_owned(), PathBuf::new())];
+        let mut pending = vec![("DEVICE".to_owned(), PathBuf::new(), DirectoryLevel::Device)];
         let mut visited = HashSet::new();
         let mut directory_lists = Vec::new();
         let mut retry_last = Vec::new();
@@ -526,7 +609,7 @@ impl Phone {
         let mut any_storage = false;
         let mut unreadable = 0;
         let mut first_error = None;
-        while let Some((parent, path)) = pending.pop() {
+        while let Some((parent, path, level)) = pending.pop() {
             if !visited.insert(parent.clone()) {
                 continue;
             }
@@ -548,12 +631,13 @@ impl Phone {
             let errors_before = unreadable;
             let mut companions = Vec::new();
             let mut listed = Vec::new();
+            let media_in_parent = self.album_scope.includes_media(level);
             for batch in children.chunks(128) {
                 let mut values = HashMap::new();
                 if batch.len() >= 8
                     && let Some(api) = &bulk
                 {
-                    match bulk::objects(api, &self.fields, &path, batch) {
+                    match bulk::objects(api, &self.fields, &path, media_in_parent, batch) {
                         Ok(objects) if objects.is_empty() => bulk = None,
                         Ok(objects) => values = objects,
                         Err(e) if interruption(e.as_ref()).is_some() => return Err(read_error("批量读取目录内的文件信息", &path, e)),
@@ -564,7 +648,7 @@ impl Phone {
                     let object = match values
                         .remove(id)
                         .map(Ok)
-                        .unwrap_or_else(|| self.object(id, &path))
+                        .unwrap_or_else(|| self.object_with_media(id, &path, media_in_parent))
                     {
                         Ok(object) => object,
                         Err(e) if interruption(e.as_ref()).is_some() => return Err(read_error("读取目录内的文件信息", &path, e)),
@@ -575,15 +659,19 @@ impl Phone {
                         }
                     };
                     emit(ScanEvent::Inspected {
-                        media: matches!(object, Object::Media(_)),
+                        media: matches!(&object, Object::Media(item)
+                            if self.album_scope.includes_file(level, &item.relative)),
                     })?;
                     match object {
-                        Object::Directory(relative) => {
+                        Object::Directory { relative, storage } => {
+                            let Some(child) = self.album_scope.child(level, &relative, storage) else {
+                                continue;
+                            };
                             any_storage = true;
                             if completed.is_some() { emit(ScanEvent::DirectoryFound(relative.clone()))?; }
-                            pending.push((id.clone(), relative));
+                            pending.push((id.clone(), relative, child));
                         }
-                        Object::Media(item) => {
+                        Object::Media(item) if self.album_scope.includes_file(level, &item.relative) => {
                             any_storage = true;
                             if completed.is_some() { listed.push(item.clone()); }
                             if let Some(last_attempt) =
@@ -598,7 +686,7 @@ impl Phone {
                                 emit(ScanEvent::Ready(item))?;
                             }
                         }
-                        Object::Other => (),
+                        _ => (),
                     }
                 }
             }
@@ -615,7 +703,7 @@ impl Phone {
                 }
                 // On reconnect, a saved list with missing originals can be used immediately.
                 // Unvisited folders follow, then checked lists, then failing directories.
-                pending.sort_by_key(|(_, p)| {
+                pending.sort_by_key(|(_, p, _)| {
                     let preferred = ranks.preferred_folder.as_ref().is_some_and(|folder| folder.starts_with(p));
                     std::cmp::Reverse((!preferred, ranks.priorities.get(p).copied().unwrap_or(1), ranks.folders.get(p).copied().unwrap_or(i64::MIN)))
                 });
@@ -670,6 +758,34 @@ fn directory_fingerprint(ids: &[String]) -> blake3::Hash {
 
 impl Source for Phone {
     fn saved_files(&self) -> Option<&dyn super::archive::SavedFiles> { Some(self) }
+    fn album_scope_version(&self) -> Option<&'static str> {
+        match self.album_scope {
+            AlbumScope::Apple => Some("apple-dcim-v1"),
+            AlbumScope::Shared => Some("android-albums-v1"),
+            #[cfg(test)]
+            AlbumScope::Unrestricted => None,
+        }
+    }
+
+    fn album_path_in_scope(&self, relative: &Path) -> bool {
+        #[cfg(test)]
+        if self.album_scope == AlbumScope::Unrestricted {
+            return true;
+        }
+        if relative.components().any(|part| !matches!(part, std::path::Component::Normal(_))) {
+            return false;
+        }
+        let mut parts = relative.iter().peekable();
+        if parts.peek().is_some_and(|root| self.storage_roots.contains(Path::new(root))) {
+            parts.next();
+        }
+        let Some(root) = parts.next().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        self.album_scope.is_album_root(root)
+            && parts.peek().is_some()
+            && parts.all(|name| name.to_str().is_some_and(|name| !name.starts_with('.')))
+    }
     fn is_phone(&self) -> bool {
         true
     }

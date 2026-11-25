@@ -480,6 +480,26 @@ pub(super) fn receive_checked(
     })
 }
 
+pub(super) fn release(db: &Connection, run: i64, key: &str, scoped: bool) -> Result<()> {
+    if scoped {
+        // The spool can also contain prior edits and receipts from outside today's albums.
+        db.execute("UPDATE phone_inbox SET released=1,run_id=?1 WHERE source=?2 AND released=0
+            AND (entry,version,digest,size) IN (
+                SELECT entry,COALESCE(version,''),digest,size FROM phone_manifest WHERE run_id=?1)",
+            params![run,key])?;
+        db.execute("UPDATE phone_inbox SET released=1 WHERE run_id=?1 AND released=0
+            AND (source,entry,version,digest,size) IN (
+                SELECT n.source,n.entry,n.version,n.digest,n.size FROM phone_native_items n
+                JOIN phone_native_supplements s ON s.run_id=n.run_id AND s.source=n.source
+                WHERE n.run_id=?1 AND n.conflict=0 AND s.checked_at IS NOT NULL)", [run])?;
+    } else {
+        db.execute("UPDATE phone_inbox SET released=1,run_id=?1 WHERE released=0 AND
+            (source=?2 OR (run_id=?1 AND source IN (SELECT source FROM phone_native_supplements WHERE run_id=?1)))",
+            params![run,key])?;
+    }
+    Ok(())
+}
+
 pub(super) fn pending_local(db: &Connection) -> Result<u64> {
     Ok(db.query_row(
         "SELECT COUNT(*) FROM phone_inbox WHERE released=1",

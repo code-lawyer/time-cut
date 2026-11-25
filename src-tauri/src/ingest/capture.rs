@@ -76,6 +76,9 @@ fn receive_one(
     active: &mut impl FnMut() -> Result<()>,
     publish: &mut impl FnMut(&Report, bool),
 ) -> Result<Option<inbox::Received>> {
+    if !source.album_path_in_scope(&item.relative) {
+        return Err("手机清单项目不属于当前相册范围".into());
+    }
     let db = &archive.db;
     report.current = item.relative.to_string_lossy().into_owned();
     report.total_bytes = item.size;
@@ -151,7 +154,7 @@ fn receive_one(
 pub(super) fn receive<Guard>(
     root: &Path,
     name: &str,
-    minimum: impl FnOnce(&str) -> Result<u64>,
+    minimum: impl FnOnce((&str, Option<&str>)) -> Result<u64>,
     make_source: impl FnOnce() -> Result<Box<dyn Source>>,
     mut update: impl FnMut(&Report),
     mut destination: impl FnMut() -> Result<Guard>,
@@ -173,6 +176,8 @@ pub(super) fn receive<Guard>(
         let identity = source.identity().to_owned();
         let key = identity.as_str();
         report.device_key = Some(verification::device_key(key));
+        let scope = source.album_scope_version();
+        report.album_scope = scope.map(str::to_owned);
         let archive = {
             let _guard = destination()?;
             Archive::open(root)?
@@ -196,30 +201,34 @@ pub(super) fn receive<Guard>(
         }
         inbox::recover_files(&archive)?;
         let previously_complete: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM phone_runs WHERE source=? AND safe_at IS NOT NULL)",
-            [key],
+            "SELECT EXISTS(SELECT 1 FROM phone_runs r LEFT JOIN phone_run_scopes s ON s.run_id=r.id
+             WHERE r.source=? AND r.safe_at IS NOT NULL AND s.scope IS ?)",
+            params![key,scope],
             |r| r.get(0),
         )?;
         let minimum = if previously_complete {
             0
         } else {
-            minimum(report.device_key.as_deref().unwrap())?
+            minimum((report.device_key.as_deref().unwrap(), scope))?
         };
         db.execute(
             "INSERT OR IGNORE INTO phone_runs(source,started) VALUES(?,?)",
             params![key, chrono::Utc::now().timestamp_millis()],
         )?;
-        let (run, started, peak, attempt, copies, bytes) = db.query_row(
-            "SELECT id,started,peak,sessions+1,copies,bytes FROM phone_runs WHERE source=? AND safe_at IS NULL",
-            [key],
+        let run: i64 = db.query_row(
+            "SELECT id FROM phone_runs WHERE source=? AND safe_at IS NULL", [key], |r| r.get(0),
+        )?;
+        if let Some(scope) = scope { inventory::apply_album_scope(db, run, source.as_ref(), scope)?; }
+        let (started, peak, attempt, copies, bytes) = db.query_row(
+            "SELECT started,peak,sessions+1,copies,bytes FROM phone_runs WHERE id=?",
+            [run],
             |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
+                    r.get::<_, u64>(1)?,
                     r.get::<_, u64>(2)?,
                     r.get::<_, u64>(3)?,
                     r.get::<_, u64>(4)?,
-                    r.get::<_, u64>(5)?,
                 ))
             },
         )?;
@@ -249,7 +258,8 @@ pub(super) fn receive<Guard>(
         let mut historical = HashMap::<PathBuf, i64>::new();
         let mut entries = db.prepare("SELECT entry FROM sources WHERE source=?")?;
         for entry in entries.query_map([key], |r| r.get::<_, String>(0))? {
-            if let Some(parent) = Path::new(&entry?).parent() {
+            let entry = PathBuf::from(entry?);
+            if source.album_path_in_scope(&entry) && let Some(parent) = entry.parent() {
                 *historical.entry(parent.to_path_buf()).or_default() += 1;
             }
         }
@@ -653,11 +663,7 @@ pub(super) fn receive<Guard>(
         }
         let safe_at = chrono::Utc::now().timestamp_millis();
         tx.execute("DELETE FROM phone_item_retries WHERE run_id=?", [run])?;
-        tx.execute(
-            "UPDATE phone_inbox SET released=1,run_id=?1 WHERE released=0 AND
-             (source=?2 OR (run_id=?1 AND source IN (SELECT source FROM phone_native_supplements WHERE run_id=?1)))",
-            params![run, key],
-        )?;
+        inbox::release(&tx, run, key, scope.is_some())?;
         tx.execute(
             "UPDATE phone_runs SET safe_at=?,discovered=?,inventory=? WHERE id=?",
             params![safe_at, report.discovered, digest, run],

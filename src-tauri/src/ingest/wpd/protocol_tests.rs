@@ -597,6 +597,10 @@ fn traced_phone(
     opened_files: Arc<Mutex<Vec<String>>>,
     property_trace: Option<Arc<Mutex<Vec<(String, usize)>>>>,
 ) -> Phone {
+    let storage_roots = rows.iter()
+        .filter(|(path, kind)| !path.contains('/') && matches!(kind, Kind::Storage))
+        .map(|(path, _)| PathBuf::from(path))
+        .collect();
     let content: IPortableDeviceContent = CameraSession {
         number,
         rows,
@@ -614,12 +618,66 @@ fn traced_phone(
         content,
         fields: keys(&[]).unwrap(), // The fixture returns all supported properties for each object.
         identity: "wpd:test-serial".into(),
+        album_scope: AlbumScope::Unrestricted,
+        storage_roots,
         folders: Default::default(),
     }
 }
 
 fn row(path: &str, kind: Kind) -> Row {
     (path.to_owned(), kind)
+}
+
+#[test]
+fn album_capture_ignores_private_and_unrelated_branches() {
+    let _apartment = Apartment::new().unwrap();
+    let sandbox = Sandbox::new();
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let rows = vec![
+        row("Phone", Kind::Storage),
+        row("Phone/Android", Kind::Folder),
+        row("Phone/Android/data", Kind::ReadFaultFolder),
+        row("Phone/Downloads", Kind::Folder),
+        row("Phone/Downloads/Pictures", Kind::Folder),
+        row("Phone/Downloads/Pictures/outside.jpg", Kind::File(b"outside", SizeHint::Object)),
+        row("Phone/loose.jpg", Kind::File(b"loose", SizeHint::Object)),
+        row("Phone/DCIM", Kind::Folder),
+        row("Phone/DCIM/Camera", Kind::Folder),
+        row("Phone/DCIM/Camera/keep.jpg", Kind::File(b"camera", SizeHint::Object)),
+        row("Phone/DCIM/Camera/.hidden.jpg", Kind::File(b"hidden", SizeHint::Object)),
+        row("Phone/DCIM/.thumbnails", Kind::ReadFaultFolder),
+        row("Phone/Pictures", Kind::Folder),
+        row("Phone/Pictures/screenshots.png", Kind::File(b"screenshot", SizeHint::Object)),
+        row("Phone/Movies", Kind::Folder),
+        row("Phone/Movies/keep.mp4", Kind::File(b"movie", SizeHint::Object)),
+        row("SD", Kind::Storage),
+        row("SD/pictures", Kind::Folder),
+        row("SD/pictures/second.png", Kind::File(b"other storage", SizeHint::Object)),
+        row("Pictures", Kind::Folder),
+        row("Pictures/direct.jpg", Kind::File(b"direct", SizeHint::Object)),
+    ];
+    for (folder, scope, expected) in [
+        ("android", AlbumScope::Shared, 5),
+        ("apple", AlbumScope::Apple, 1),
+    ] {
+        let mut source = phone(1, rows.clone(), None, opened.clone());
+        source.album_scope = scope;
+        let report = crate::ingest::capture::receive(
+            &sandbox.dir(folder),
+            "WPD",
+            |_| Ok(0),
+            || Ok(Box::new(source)),
+            |_| {},
+            || Ok(()),
+            || Ok(()),
+        );
+        assert!(report.safe_at.is_some(), "{}: {:?}", report.phase, report.issues);
+        assert_eq!((report.discovered, report.added, report.rechecked), (expected, expected, expected));
+    }
+    let reads = opened.lock().unwrap();
+    assert!(!reads.iter().any(|name| {
+        ["outside", "loose", ".hidden"].iter().any(|&part| name.contains(part))
+    }));
 }
 
 #[test]

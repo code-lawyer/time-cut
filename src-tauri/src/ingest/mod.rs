@@ -84,6 +84,8 @@ pub struct Report {
     export_shortfall: Option<inventory::Shortfall>,
     pending: u64,
     device_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    album_scope: Option<String>,
     inventory: Option<String>,
     verified: bool,
     repeat_due: bool,
@@ -722,7 +724,7 @@ where
         capture::receive(
             Path::new(&dest.root),
             label,
-            |key| verification::capture_minimum(&db, dest, key),
+            |(key, scope)| verification::capture_minimum(&db, dest, key, scope),
             make_source,
             progress,
             guard,

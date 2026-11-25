@@ -83,6 +83,7 @@ test('only a recorded release displays the cable notice and measured duration', 
   assert.match(old, /data-testid="originals-safe"/);
   assert.doesNotMatch(old, /本轮接收用时/);
   const released = await render({ safe_at: started + 7_215_871 });
+  assert.match(released, /相册原件已收齐，可以拔线/);
   assert.match(released, /本轮接收用时 2:00:15/);
 });
 
@@ -100,7 +101,8 @@ test('an outstanding local filing error supersedes an earlier release and repeat
   const html = await render({ local_errors: 1, local_error: '示例原件校验失败', safe_at: started, verified: true });
   assert.match(html, /有 1 项本地收件尚未归档/);
   assert.match(html, /示例原件校验失败/);
-  assert.doesNotMatch(html, /data-testid="originals-safe"|全量复扫完成/);
+  assert.doesNotMatch(html, /data-testid="originals-safe"/);
+  assert.ok(!html.includes(messages['zh-CN'].timecut.repeatVerified));
 });
 
 test('offline receipts show the saved count without an unplug notice', async () => {

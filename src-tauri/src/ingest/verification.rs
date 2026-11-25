@@ -63,7 +63,7 @@ pub(super) fn arm_existing(control: &Connection, minimum: u64, repeat: bool) -> 
     tx.execute("INSERT INTO phone_verification(library,album,device,minimum) VALUES(?,?,?,?)
         ON CONFLICT(library,album,device) DO UPDATE SET minimum=excluded.minimum,baseline=NULL,verified_at=NULL,
         attempts=0,last_checked=NULL,last_phase=NULL
-        WHERE phone_verification.minimum<excluded.minimum OR phone_verification.verified_at IS NOT NULL",
+        WHERE phone_verification.minimum<>excluded.minimum OR phone_verification.verified_at IS NOT NULL",
         params![dest.library, dest.album, key, minimum])?;
     tx.execute(
         "UPDATE config SET data=json_set(data,'$.auto',json('true')) WHERE id=1",
@@ -84,7 +84,7 @@ pub(super) fn arm_existing(control: &Connection, minimum: u64, repeat: bool) -> 
     Ok(())
 }
 
-pub(super) fn capture_minimum(db: &Connection, dest: &Target, key: &str) -> Result<u64> {
+pub(super) fn capture_minimum(db: &Connection, dest: &Target, key: &str, scope: Option<&str>) -> Result<u64> {
     let requested: Option<u64> = db.query_row(
         "SELECT minimum FROM phone_verification WHERE library=? AND album=? AND device=? AND verified_at IS NULL",
         params![dest.library, dest.album, key], |r| r.get(0),
@@ -95,8 +95,8 @@ pub(super) fn capture_minimum(db: &Connection, dest: &Target, key: &str) -> Resu
     let observed: Option<u64> = db.query_row(
         "SELECT MAX(MAX(COALESCE(json_extract(data,'$.discovered'),0),
                         COALESCE(json_extract(data,'$.expected_minimum'),0)))
-         FROM history WHERE json_extract(data,'$.device_key')=?",
-        [key], |r| r.get(0),
+         FROM history WHERE json_extract(data,'$.device_key')=? AND json_extract(data,'$.album_scope') IS ?",
+        params![key,scope], |r| r.get(0),
     )?;
     let floor = requested.max(observed.unwrap_or(0));
     if floor > requested {
@@ -152,14 +152,18 @@ pub(super) fn observe(db: &Connection, dest: &Target, report: &mut Report) -> Re
     };
     report.expected_minimum = Some(minimum);
     let now = chrono::Utc::now().timestamp();
-    let mut next_baseline = baseline.as_ref();
+    let mut next_baseline = baseline;
     if let Some(inventory) = &report.inventory {
+        let comparison = match &report.album_scope {
+            Some(scope) => format!("{scope}/{inventory}"),
+            None => inventory.clone(),
+        };
         if report.discovered < minimum {
             report.phase = "等待完整媒体清单".into();
-        } else if report.added == 0 && baseline.as_ref() == Some(inventory) {
+        } else if report.added == 0 && next_baseline.as_ref() == Some(&comparison) {
             report.verified = true;
         } else {
-            next_baseline = Some(inventory);
+            next_baseline = Some(comparison);
             report.phase = "等待全量复扫".into();
         }
     }

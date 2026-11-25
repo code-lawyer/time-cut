@@ -12,6 +12,15 @@ node scripts/test_timecut_phone.mjs <exe> --android-device "Galaxy S21 5G"
 
 The runner prints the test directory under `.timecut-build/android-full-*`. To resume a stopped run, insert that directory after the EXE argument. The full test checks intake, local filing, per-file BLAKE3, album membership, a second scan of the same phone, local-folder deduplication and on-device media decoding on the PC. To check the Windows Shell view independently, capture a snapshot with `measure_timecut_android_inventory.ps1` and compare it offline with an explicit completed run ID.
 
+For an independent Android album acceptance, capture the album inventory while Time-cut is idle, then supply it to the runner.
+
+```powershell
+pwsh -STA -File scripts/measure_timecut_android_inventory.ps1 -Scope Gallery -Snapshot .timecut-build/gallery-shell.json -DeviceName "Galaxy S21 5G"
+node scripts/test_timecut_phone.mjs <exe> --android-device "Galaxy S21 5G" --gallery-snapshot .timecut-build/gallery-shell.json
+```
+
+The runner compares both complete scans with every path and byte length in the independent snapshot. It also checks that the current verified receipts have been filed. An upgrade test can reuse a copied archive from an older import; unrelated receipts from the earlier scope remain in its inbox.
+
 For a stalled Android import, close the isolated application to release the USB session, then run `verify_android_source_samples.ps1 -ArchiveRoot <archive> -RunId <id> -InboxOnly` under `pwsh -STA`. The default sample compares source and inbox bytes. Add `-SampleGroup Pending` to inspect unresolved files. A matching sample establishes byte integrity for the selected file.
 
 To test additions, duplicates, same-name files, sidecars and a same-length replacement on a Samsung phone, use `test_android_mtp_fixture.ps1` with the same local receipt throughout. Run `prepare` offline, then `seed`. Build the empty-directory helper and run its `bind` command while the ownership marker is still present. Scan the seeded phone, run `mutation`, then scan again. On a successful whole-device baseline, `verify_android_fixture_run.py` compares the three completed run IDs with the receipt. When a separate file blocks the whole device, the opt-in Rust test `owned_android_fixture_capture_and_repeat` can exercise the generated directory on its own. Run that test once after seed and once after mutation. Finish with the fixture script's `cleanup` and the bound directory helper's `remove`. The scripts' header examples show the arguments.

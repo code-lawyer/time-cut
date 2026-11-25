@@ -5,6 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import { verifyLocalGallery, verifyOriginals } from './verify_timecut_archive.mjs';
+import { compareGalleryRun, galleryInbox, galleryScope, loadGallerySnapshot, observePhoneProgress } from './verify_timecut_android.mjs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -13,6 +14,9 @@ const androidFlag = process.argv.indexOf('--android-device');
 const android = androidFlag >= 0;
 const deviceName = android ? process.argv[androidFlag + 1] : null;
 if (android) assert.ok(deviceName, 'An exact Android device name is required');
+const galleryFlag = process.argv.indexOf('--gallery-snapshot');
+if (galleryFlag >= 0) assert.ok(android && process.argv[galleryFlag + 1], 'Android gallery snapshot path required');
+const gallerySnapshot = galleryFlag >= 0 ? loadGallerySnapshot(process.argv[galleryFlag + 1]) : null;
 const singleFlag = process.argv.indexOf('--single-scan');
 const single = singleFlag >= 0;
 const scenarioName = single ? process.argv[singleFlag + 1] : null;
@@ -35,7 +39,8 @@ if (verifyLocal) {
   console.log(JSON.stringify(totals));
   process.exit(0);
 }
-const resuming = fs.existsSync(path.join(root, 'result.json'));
+const galleryResult = path.join(root, 'gallery-result.json');
+const resuming = fs.existsSync(path.join(root, 'result.json')) || (gallerySnapshot && fs.existsSync(galleryResult));
 if (single) assert.ok(resuming, 'The previous phone acceptance record is missing');
 if (args[1] && !resuming) {
   const baseline = JSON.parse(fs.readFileSync(path.join(root, 'baseline.json'), 'utf8'));
@@ -43,22 +48,31 @@ if (args[1] && !resuming) {
   assert.equal(baseline.importStarted, false);
   for (const folder of [archive, profile]) assert.equal(fs.readdirSync(folder).length, 0);
 }
-const resultPath = path.join(root, single ? 'scenario-' + scenarioName + '.json' : 'result.json');
+const resultPath = single ? path.join(root, 'scenario-' + scenarioName + '.json') :
+  gallerySnapshot ? galleryResult : path.join(root, 'result.json');
 const evidence = fs.existsSync(resultPath) ? JSON.parse(fs.readFileSync(resultPath, 'utf8')) :
   { stage: 'starting', root, started: new Date().toISOString() };
 let continuing;
+let previousReceiptId = 0;
 if (resuming && !single) {
   const previous = new DatabaseSync(path.join(archive, '.time-cut', 'imports.sqlite3'), { readOnly: true, timeout: 3000 });
   try {
+    const baselinePath = path.join(root, 'result.json');
+    const legacyBaseline = gallerySnapshot && fs.existsSync(baselinePath) &&
+      JSON.parse(fs.readFileSync(baselinePath, 'utf8')).legacyBaseline === true;
     const hasIntake = previous.prepare("SELECT 1 FROM sqlite_master WHERE name='phone_runs'").get()
       && previous.prepare('SELECT 1 FROM phone_runs LIMIT 1').get();
+    if (gallerySnapshot && hasIntake) {
+      previousReceiptId = previous.prepare('SELECT COALESCE(MAX(id),0) AS id FROM phone_inbox').get().id;
+    }
     assert.ok(hasIntake || previous.prepare('SELECT 1 FROM files LIMIT 1').get(),
       'Resume requires a saved phone intake or an existing archive');
     if (hasIntake) {
       const db = new DatabaseSync(path.join(profile, 'import-control.sqlite3'), { readOnly: true, timeout: 3000 });
       try {
         const selected = JSON.parse(db.prepare('SELECT data FROM config WHERE id=1').get().data);
-        if (selected.auto && path.resolve(selected.root) === archive) {
+        if (legacyBaseline) assert.equal(path.resolve(selected.root), archive, 'The legacy profile points at another archive');
+        if ((selected.auto || legacyBaseline) && path.resolve(selected.root) === archive) {
           continuing = {
             historyId: db.prepare('SELECT COALESCE(MAX(id),0) AS n FROM history').get().n,
             safeAt: previous.prepare('SELECT COALESCE(MAX(safe_at),0) AS n FROM phone_runs').get().n,
@@ -87,12 +101,12 @@ function save(fields) {
     if (single || !['EACCES', 'EPERM', 'EBUSY'].includes(error.code)) throw error;
   }
 }
-const compact = ({ phase, scanned, discovered, added, skipped, failed, inventory, safe_at, capture_started_at }) =>
-  ({ phase, scanned, discovered, added, skipped, failed, ...(inventory ? { inventory } : {}),
+const compact = ({ phase, scanned, discovered, added, skipped, failed, inventory, album_scope, safe_at, capture_started_at }) =>
+  ({ phase, scanned, discovered, added, skipped, failed, ...(album_scope ? { album_scope } : {}), ...(inventory ? { inventory } : {}),
     ...(safe_at ? { safe_at, capture_started_at, cableMs: safe_at - capture_started_at } : {}) });
 const matchesDevice = name => android ? name === deviceName : /iPhone/i.test(name);
 const fromPhone = report => !path.isAbsolute(report.source) && matchesDevice(report.source);
-if (resuming && !single && !evidence.firstTransfer) {
+if (resuming && !single && !gallerySnapshot && !evidence.firstTransfer) {
   const history = new DatabaseSync(path.join(profile, 'import-control.sqlite3'), { readOnly: true, timeout: 3000 });
   try {
     const first = history.prepare('SELECT data FROM history ORDER BY id').all()
@@ -104,10 +118,14 @@ if (resuming && !single && !evidence.firstTransfer) {
 }
 const singleModule = single ? await import('./test_timecut_android_changes.mjs') : null;
 if (single) {
-  const context = { executable, root, archive, profile, deviceName, scenarioName, evidence, save };
+  const context = { executable, root, archive, profile, deviceName, scenarioName, evidence, save, gallerySnapshot };
   if (!singleModule.prepare(context)) process.exit(0);
 }
 save(android ? { device: deviceName } : {});
+if (gallerySnapshot) {
+  if (evidence.shellSha256) assert.equal(evidence.shellSha256, gallerySnapshot.inventorySha256, 'Scenario baseline changed');
+  save({ expectedScope: galleryScope, shellEntries: gallerySnapshot.entries, shellSha256: gallerySnapshot.inventorySha256 });
+}
 console.log(root);
 
 const port = await new Promise((resolve, reject) => {
@@ -214,7 +232,7 @@ async function runAcceptance() {
   await waitFor(() => page(() => !!document.querySelector('[data-testid=import-open]')), 'loading the import screen', 30);
   const version = await invoke('plugin:app|version');
   if (single) {
-    await singleModule.measure({ archive, profile, evidence, save, version, invoke, usb, waitFor });
+    await singleModule.measure({ archive, profile, evidence, save, version, invoke, usb, waitFor, gallerySnapshot });
     return;
   }
   if (!continuing) await invoke('timecut_configure', { path: archive, auto: false });
@@ -235,17 +253,16 @@ async function runAcceptance() {
   let firstInboxPhoto;
   function newPhotoReceived() {
     if (!firstInboxPhoto && ingest.prepare("SELECT 1 FROM sqlite_master WHERE name='phone_inbox'").get()) {
-      firstInboxPhoto = ingest.prepare(`SELECT 1 FROM phone_inbox WHERE blob IS NOT NULL AND
+      firstInboxPhoto = ingest.prepare(`SELECT 1 FROM phone_inbox WHERE blob IS NOT NULL AND id>? AND
         (${[...photoTypes].map(ext => `lower(substr(entry,-${ext.length}))=?`).join(' OR ')}) LIMIT 1`);
     }
-    return firstInboxPhoto ? firstInboxPhoto.get(...photoTypes) : !resuming && firstPhoto.get(...photoTypes);
+    return firstInboxPhoto ? firstInboxPhoto.get(previousReceiptId, ...photoTypes) : !resuming && firstPhoto.get(...photoTypes);
   }
   const started = Date.now();
   let lastActivity = Date.now();
   let lastDiskCheck = 0;
-  let highWater = { scanned: 1, originals: 0, addedOrSkipped: 0, bytes: 0 };
-  let previousAttempt = null;
-  const expectedMinimum = evidence.firstTransfer?.discovered ?? 1;
+  let previousProgress;
+  const expectedMinimum = gallerySnapshot?.entries ?? evidence.firstTransfer?.discovered ?? 1;
   const transferAfter = continuing?.historyId ?? latestHistoryId();
   save({ stage: 'transferring',
     version: evidence.version ?? version, verificationVersion: version, owner, appPid: app.pid });
@@ -254,19 +271,9 @@ async function runAcceptance() {
     const state = await usb();
     const report = compact(state.report);
     const files = stats.get();
-    const attempt = state.recent[0] ? JSON.stringify(compact(state.recent[0])) : '';
-    if (attempt !== previousAttempt) {
-      previousAttempt = attempt;
-      highWater = { scanned: 1, originals: files.originals, addedOrSkipped: 0, bytes: 0 };
-    }
-    const activity = {
-      scanned: report.scanned, originals: files.originals,
-      addedOrSkipped: report.added + report.skipped, bytes: state.report.transferred_bytes,
-    };
-    if (Object.keys(activity).some(key => activity[key] > highWater[key])) {
-      for (const key of Object.keys(activity)) highWater[key] = Math.max(activity[key], highWater[key]);
-      lastActivity = Date.now();
-    }
+    const progress = observePhoneProgress(previousProgress, state.report, files.originals, gallerySnapshot && galleryScope);
+    previousProgress = progress.previous;
+    if (progress.advanced) lastActivity = Date.now();
     const elapsedMs = Date.now() - started;
     if (elapsedMs - lastDiskCheck > 30000) {
       lastDiskCheck = elapsedMs;
@@ -287,9 +294,23 @@ async function runAcceptance() {
       if (byteProgress) save({ byteProgress });
     }
     const issues = state.report.issues.flatMap(issue => issue.match(/0x[0-9a-f]{8}|手机原件流提前结束|手机原件长度在传输途中发生变化|未看到手机存储|暂不可读|拒绝访问/gi) ?? []);
-    save({ elapsedMs, report, receipts:state.report.total_received, receiptBytes:state.report.total_received_bytes, compared:state.report.compared_bytes, listedItems:state.report.listed_items, listedFolders:state.report.listed_folders, ...files, detected: state.devices.length === 1, issueKinds: [...new Set(issues)] });
+    const received = gallerySnapshot
+      ? { lifetimeReceipts: state.report.total_received, lifetimeReceiptBytes: state.report.total_received_bytes,
+          attemptReceivedBytes: state.report.received_bytes }
+      : { receipts: state.report.total_received, receiptBytes: state.report.total_received_bytes };
+    save({ elapsedMs, report, ...received, compared: state.report.compared_bytes, rechecked: state.report.rechecked,
+      checkedFolders: state.report.checked_folders, listedItems: state.report.listed_items, listedFolders: state.report.listed_folders,
+      ...files, detected: state.devices.length === 1, issueKinds: [...new Set(issues)] });
     const terminal = completedPhoneRunAfter(transferAfter, continuing?.safeAt ?? started - 1);
     if (terminal) {
+      if (gallerySnapshot) {
+        assert.equal(terminal.album_scope, galleryScope);
+        assert.equal(terminal.rechecked, gallerySnapshot.entries);
+        const rows = ingest.prepare('SELECT id FROM phone_runs WHERE safe_at=? AND inventory=?').all(terminal.safe_at, terminal.inventory);
+        assert.equal(rows.length, 1);
+        const comparison = compareGalleryRun(ingest, rows[0].id, gallerySnapshot);
+        save({ independentTransferInventory: comparison });
+      }
       assert.ok(terminal.discovered >= expectedMinimum,
         `This scan exposed only ${terminal.discovered} items; the previous scan found ${expectedMinimum}`);
       save({ transferHistoryId: terminal.id });
@@ -304,12 +325,28 @@ async function runAcceptance() {
     await waitFor(async () => {
       const state = await usb();
       if (state.report.local_errors) throw Error(state.report.local_error || 'Some originals could not be filed');
+      if (gallerySnapshot) {
+        const spool = galleryInbox(ingest, evidence.independentTransferInventory);
+        if (spool.released || spool.outstanding) return false;
+        save({ retainedUnreleasedAfterTransfer: spool.unreleased });
+        return true;
+      }
       return ingest.prepare('SELECT count(*) AS count FROM phone_inbox WHERE released=1').get().count === 0;
     },
       'filing originals locally after the phone is released', Infinity, 2000);
   }
   catalog = new DatabaseSync(path.join(profile, 'libraries', owner.library + '.db'), { readOnly: true, timeout: 3000 });
   const files = ingest.prepare('SELECT path,size,digest FROM files').all();
+  let scopedFiles = files;
+  if (gallerySnapshot) {
+    const runId = evidence.independentTransferInventory.runId;
+    const keys = new Set(ingest.prepare('SELECT DISTINCT digest,size FROM phone_manifest WHERE run_id=?')
+      .all(runId).map(row => row.digest + '/' + row.size));
+    scopedFiles = files.filter(row => keys.has(row.digest + '/' + row.size));
+    assert.equal(new Set(scopedFiles.map(row => row.digest + '/' + row.size)).size, keys.size,
+      'A current album digest or size is missing from the archive');
+    save({ scopedReceiptRows: gallerySnapshot.entries, scopedUniqueContents: keys.size, scopedArchivePaths: scopedFiles.length });
+  }
   if (result.safe_at) {
     const normalize = name => path.normalize(name).toLowerCase();
     const originals = files.filter(file => !['.aae', '.xmp'].includes(path.extname(file.path).toLowerCase()));
@@ -334,7 +371,8 @@ async function runAcceptance() {
   const sources = ingest.prepare('SELECT count(*) AS count FROM sources').get().count;
   // WPD can expose multiple objects under the same display path. A source
   // entry can represent more than one archived file over the course of a scan.
-  assert.ok(sources > 0 && files.length >= result.added, 'The archive covers the completed transfers');
+  assert.ok(sources > 0 && (gallerySnapshot ? scopedFiles.length > 0 : files.length >= result.added),
+    'The archive covers the completed transfers');
   const verified = verifyOriginals(executable, archive);
   assert.equal(verified.filesVerified, files.length);
   assert.equal(fs.readdirSync(path.join(archive, '.time-cut', 'staging')).length, 0);
@@ -349,11 +387,11 @@ async function runAcceptance() {
   save({ repeat: compact(repeat), repeatHistoryId: repeat.id });
   if (android) {
     const { verifyAndroidFiling } = await import('./verify_timecut_android.mjs');
-    const filing = verifyAndroidFiling(executable, archive, profile, owner.album, owner.library, repeat);
+    const filing = verifyAndroidFiling(executable, archive, profile, owner.album, owner.library, repeat, gallerySnapshot);
     save({ androidFiling: filing });
   }
   const repeatSource = fs.mkdtempSync(path.join(root, 'duplicate-sample-'));
-  const sample = files.find(file => photoTypes.has(path.extname(file.path).toLowerCase()));
+  const sample = scopedFiles.find(file => photoTypes.has(path.extname(file.path).toLowerCase()));
   assert.ok(sample);
   fs.copyFileSync(path.resolve(archive, sample.path), path.join(repeatSource, 'sample' + path.extname(sample.path)));
   await invoke('timecut_folder', { path: repeatSource, indexOnly: false });
@@ -377,11 +415,12 @@ async function runAcceptance() {
     return !scenes.counts.pending && faces.unprocessed === 0 && !(await invoke('is_face_indexing'))[0];
   }, 'organizing imported media on-device', 10800, 3000);
   assert.ok(ready);
+  const scopedPaths = new Set(scopedFiles.map(file => path.resolve(archive, file.path).toLowerCase()));
   const independent = catalog.prepare(`SELECT b.path AS directory, a.name
     FROM afiles a JOIN afolders b ON b.id=a.folder_id
     WHERE b.album_id=? AND a.file_type=2 AND a.size>10000
       AND NOT EXISTS(SELECT 1 FROM afiles f WHERE f.live_photo_video_id=a.id)
-    ORDER BY a.size LIMIT 1`).get(owner.album);
+    ORDER BY a.size`).all(owner.album).find(row => scopedPaths.has(path.resolve(row.directory, row.name).toLowerCase()));
   if (independent) {
     const directory = path.join(path.dirname(executable), 'ffmpeg');
     const video = path.join(independent.directory, independent.name);

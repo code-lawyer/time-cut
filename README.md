@@ -1,6 +1,6 @@
 # Time-cut for Windows
 
-Time-cut 将手机或文件夹中的照片和视频保存到本机，按内容去重，支持中断恢复、拍摄时间线、地点、人物和场景分类。相册基于 Lap v0.4.1。Windows x64 便携测试包解压后运行 `Time-cut.exe`，更新时退出托盘程序并解压新版。使用前请阅读手机整机导入的验收范围。[Windows 使用说明](docs/Time-cut-Windows.md) · [隐私说明](PRIVACY.md)
+Time-cut 将手机或文件夹中的照片和视频保存到本机，按内容去重，支持中断恢复、拍摄时间线、地点、人物和场景分类。相册基于 Lap v0.4.1。Windows x64 便携测试包解压后运行 `Time-cut.exe`，更新时退出托盘程序并解压新版。通过 USB 导入时，安卓扫描 DCIM、Pictures 和 Movies 相册目录，iPhone 扫描 DCIM 相机目录。[Windows 使用说明](docs/Time-cut-Windows.md) · [隐私说明](PRIVACY.md)
 
 工作流构建的便携 ZIP 随附 SHA-256 校验文件，包内 `BUILD-INFO.json` 记录源码提交和程序摘要。已有本地构建的成品位于 `release-test`。从当前代码生成新版请参阅[源码构建步骤](docs/Time-cut-Windows.md#从本地源码构建)。
 

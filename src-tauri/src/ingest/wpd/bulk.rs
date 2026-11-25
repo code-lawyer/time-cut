@@ -9,6 +9,7 @@ enum Batch {
 #[implement(IPortableDevicePropertiesBulkCallback)]
 struct Callback {
     parent: PathBuf,
+    media_in_parent: bool,
     sender: mpsc::Sender<Batch>,
 }
 
@@ -30,7 +31,7 @@ impl IPortableDevicePropertiesBulkCallback_Impl for Callback_Impl {
         for index in 0..count {
             let item = unsafe { values.GetAt(index)? };
             if let Some(id) = text_value(&item, &WPD_OBJECT_ID)
-                && let Ok(object) = Phone::describe(&item, &id, &self.parent, || None)
+                && let Ok(object) = Phone::describe(&item, &id, &self.parent, self.media_in_parent, || None)
                 && !matches!(&object,Object::Media(i) if i.size.is_none())
             {
                 rows.push((id, object));
@@ -51,6 +52,7 @@ pub(super) fn objects(
     api: &IPortableDevicePropertiesBulk,
     keys: &IPortableDeviceKeyCollection,
     parent: &Path,
+    media_in_parent: bool,
     ids: &[String],
 ) -> Result<HashMap<String, Object>> {
     unsafe {
@@ -71,6 +73,7 @@ pub(super) fn objects(
         let (sender, receiver) = mpsc::channel();
         let callback: IPortableDevicePropertiesBulkCallback = Callback {
             parent: parent.to_path_buf(),
+            media_in_parent,
             sender,
         }
         .into();

@@ -183,6 +183,7 @@ pub(super) fn resume<Guard>(
         }
         let _guard = destination()?;
         let expected = target.item;
+        if !source.album_path_in_scope(&expected.relative) { continue; }
         if reference_first && target.reference.is_none() && !recovery.is_controlled_target() {
             break;
         }

@@ -5,15 +5,16 @@ use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 // Both maps belong to one open WPD session. These handles must never go to disk.
 #[derive(Default)]
 pub(super) struct Folders {
-    named: HashMap<String, HashMap<PathBuf, Option<String>>>,
+    named: HashMap<String, HashMap<PathBuf, Option<(String, DirectoryLevel)>>>,
     members: HashMap<String, HashSet<String>>,
 }
 
 impl Phone {
-    fn listed_child(&self, folder: &Path, file: &str) -> Result<bool> {
+    fn listed_child(&self, folder: &Path, file: &Path, id: &str) -> Result<bool> {
         let mut cache = self.folders.borrow_mut();
         let mut parent_id = String::from("DEVICE");
         let mut path = PathBuf::new();
+        let mut level = DirectoryLevel::Device;
         for component in folder.components() {
             let std::path::Component::Normal(name) = component else {
                 return Ok(false);
@@ -25,24 +26,29 @@ impl Phone {
                     for id in self.children(&parent_id)? {
                         let values =
                             unsafe { self.props.GetValues(&HSTRING::from(&id), &self.fields)? };
-                        if let Object::Directory(child) =
-                            Self::describe(&values, &id, &path, || None)?
+                        if let Object::Directory { relative, storage } =
+                            Self::describe(&values, &id, &path, false, || None)?
+                            && let Some(child_level) = self.album_scope.child(level, &relative, storage)
                         {
                             // The displayed path must identify exactly one directory.
                             names
-                                .entry(child)
+                                .entry(relative)
                                 .and_modify(|old| *old = None)
-                                .or_insert(Some(id));
+                                .or_insert(Some((id, child_level)));
                         }
                     }
                     slot.insert(names)
                 }
             };
             path.push(name);
-            let Some(Some(id)) = folders.get(&path) else {
+            let Some(Some((id, child_level))) = folders.get(&path) else {
                 return Ok(false);
             };
             parent_id.clone_from(id);
+            level = *child_level;
+        }
+        if !self.album_scope.includes_file(level, file) {
+            return Ok(false);
         }
         let children = match cache.members.entry(parent_id) {
             std::collections::hash_map::Entry::Occupied(known) => known.into_mut(),
@@ -51,7 +57,7 @@ impl Phone {
                 slot.insert(children)
             }
         };
-        Ok(children.contains(file))
+        Ok(children.contains(id))
     }
 
     fn current_id(&self, persistent: &str) -> Result<Option<String>> {
@@ -102,7 +108,7 @@ impl SavedFiles for Phone {
         let Some(parent) = expected.relative.parent() else {
             return Ok(None);
         };
-        if !self.listed_child(parent, &id)? {
+        if !self.listed_child(parent, &expected.relative, &id)? {
             return Ok(None);
         }
         let Object::Media(item) = self.object(&id, parent)? else {

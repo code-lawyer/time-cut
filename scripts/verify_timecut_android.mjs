@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { verifyLocalGallery } from './verify_timecut_archive.mjs';
@@ -10,10 +12,81 @@ const hasTable = (db, name) => Boolean(db.prepare(
 const normalized = value => process.platform === 'win32'
   ? path.toNamespacedPath(path.resolve(value)).toLowerCase() : path.resolve(value);
 const attachment = name => path.extname(name).toLowerCase().match(/^\.(aae|xmp)$/)?.[1];
+export const galleryScope = 'android-albums-v1';
+const sha256 = value => createHash('sha256').update(value).digest('hex');
+
+// The first status after opening a resumed app can still show the old, wider inventory.
+// Directory validation, original comparisons and final reconciliation also make progress without new copies.
+export function observePhoneProgress(previous, report, originals, scope) {
+  if (scope && report.album_scope !== scope) return { previous, advanced: false };
+  const session = [report.source, report.capture_started_at, report.receive_attempt].join('|');
+  const sameSession = previous?.session === session;
+  const counters = [report.scanned, report.added + report.skipped, originals, report.known_folders,
+    report.checked_folders, report.listed_folders, report.listed_items, report.rechecked,
+    report.compared_bytes, report.received_bytes].map(value => Number.isFinite(value) ? value : 0);
+  const advanced = counters.some((n, i) => n > (sameSession ? previous.counters[i] : 0)) ||
+    (report.transferred_bytes ?? 0) > (sameSession && report.current === previous.current && report.phase === previous.phase
+      ? previous.bytes : 0);
+  return { previous: { session, counters: counters.map((n, i) => Math.max(n, sameSession ? previous.counters[i] : 0)),
+    current: report.current, phase: report.phase, bytes: report.transferred_bytes ?? 0 }, advanced };
+}
+
+export function loadGallerySnapshot(filename) {
+  const s = JSON.parse(fs.readFileSync(filename, 'utf8'));
+  assert.equal(s.format, 'timecut-shell-gallery-path-size-sha256-v1');
+  assert.deepEqual(s.galleryRoots, ['DCIM', 'Pictures', 'Movies']);
+  assert.ok(s.rootFolders > 0 && Number.isSafeInteger(s.entries) && s.entries > 0 &&
+    Number.isSafeInteger(s.knownBytes) && s.knownBytes >= 0 &&
+    Array.isArray(s.tokens) && s.tokens.length === s.entries, 'Invalid independent gallery inventory');
+  assert.ok(s.tokens.every((t, i) => /^[a-f0-9]{64}$/.test(t) && (i === 0 || s.tokens[i - 1] <= t)));
+  assert.equal(sha256(s.tokens.join('')), s.inventorySha256);
+  return s;
+}
+
+// Compare *every* app entry (including extras) against the independent Shell inventory.
+// The manifest join additionally proves that every such listing has a reconciled receipt.
+export function compareGalleryRun(db, runId, snapshot) {
+  const run = db.prepare(`SELECT r.safe_at,r.discovered,l.total,s.scope FROM phone_runs r
+    JOIN phone_lists l ON l.run_id=r.id JOIN phone_run_scopes s ON s.run_id=r.id WHERE r.id=?`).get(runId);
+  assert.ok(run?.safe_at && run.scope === galleryScope, 'A completed Android album run is required');
+  assert.equal(run.discovered, snapshot.entries);
+  assert.equal(run.total, snapshot.entries);
+  const tokens = [];
+  let knownBytes = 0;
+  for (const item of db.prepare('SELECT ordinal,entry,size FROM phone_list_items WHERE run_id=? ORDER BY ordinal').iterate(runId)) {
+    assert.equal(item.ordinal, tokens.length, 'Android inventory ordinals are incomplete');
+    assert.ok(typeof item.entry === 'string' && Number.isSafeInteger(item.size) && item.size >= 0);
+    tokens.push(sha256(item.entry.replaceAll('\\', '/') + '\0' + item.size));
+    knownBytes += item.size;
+  }
+  tokens.sort();
+  assert.equal(tokens.length, snapshot.entries);
+  assert.equal(sha256(tokens.join('')), snapshot.inventorySha256, 'Android inventory differs from Shell');
+  assert.equal(knownBytes, snapshot.knownBytes);
+  const matched = db.prepare(`SELECT COUNT(*) AS n FROM phone_list_items l JOIN phone_manifest m
+    ON m.run_id=l.run_id AND m.ordinal=l.ordinal AND m.entry=l.entry AND m.version IS l.version
+    AND m.size=l.size AND m.digest=l.digest WHERE l.run_id=?`).get(runId).n;
+  assert.equal(matched, snapshot.entries);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM phone_manifest WHERE run_id=?').get(runId).n, matched);
+  return { runId, scope: run.scope, matched, knownBytes, inventorySha256: snapshot.inventorySha256 };
+}
+
+// A pre-migration spool can contain an earlier version or an excluded path from the
+// same run. Only a fully matched current manifest authorizes this distinction.
+export function galleryInbox(db, comparison) {
+  assert.equal(comparison.scope, galleryScope);
+  assert.ok(comparison.matched > 0);
+  const released = db.prepare('SELECT COUNT(*) AS n FROM phone_inbox WHERE released=1').get().n;
+  const outstanding = db.prepare(`SELECT COUNT(DISTINCT i.id) AS n FROM phone_runs r
+    JOIN phone_manifest m ON m.run_id=r.id JOIN phone_inbox i ON i.source=r.source AND i.entry=m.entry
+      AND i.version=COALESCE(m.version,'') AND i.digest=m.digest AND i.size=m.size WHERE r.id=?`).get(comparison.runId).n;
+  const unreleased = db.prepare('SELECT COUNT(*) AS n FROM phone_inbox WHERE released=0').get().n;
+  return { released, outstanding, unreleased };
+}
 
 // Verify only local evidence. The caller supplies the final phone report and the destination
 // it selected in the packaged app. Nothing returned contains device IDs, paths or filenames.
-export function verifyAndroidFiling(exe, archive, profile, albumId, library, report) {
+export function verifyAndroidFiling(exe, archive, profile, albumId, library, report, gallerySnapshot = null) {
   assert.ok(Number.isSafeInteger(albumId) && /^[\w-]+$/.test(library), 'Invalid destination');
   assert.ok(report?.safe_at > 0 && report.discovered > 0 && report.failed === 0
     && report.added + report.skipped === report.discovered, 'Phone report is incomplete');
@@ -45,8 +118,16 @@ export function verifyAndroidFiling(exe, archive, profile, albumId, library, rep
         .get(run.safe_at);
       assert.ok(saved && JSON.parse(saved.data).device_key === report.device_key, 'Phone identity differs from saved history');
     }
-    assert.ok(!ingest.prepare('SELECT 1 FROM phone_inbox WHERE run_id=? LIMIT 1').get(run.id),
-      'The completed USB run still has unfiled receipts');
+    let comparison, spool;
+    if (gallerySnapshot) {
+      assert.equal(report.album_scope, galleryScope);
+      comparison = compareGalleryRun(ingest, run.id, gallerySnapshot);
+      spool = galleryInbox(ingest, comparison);
+      assert.ok(spool.released === 0 && spool.outstanding === 0, 'Current gallery receipts remain unfiled');
+    } else {
+      assert.ok(!ingest.prepare('SELECT 1 FROM phone_inbox WHERE run_id=? LIMIT 1').get(run.id),
+        'The completed USB run still has unfiled receipts');
+    }
 
     const byDigest = new Map();
     const filedPaths = new Map();
@@ -134,7 +215,8 @@ export function verifyAndroidFiling(exe, archive, profile, albumId, library, rep
       WHERE b.album_id=? AND f.person_id IS NOT NULL`).iterate(albumId)) {
       if (selectedIds.has(row.file_id)) people.add(row.person_id);
     }
-    return { ...originals, receiptsVerified, matchedDigests: matchedDigests.size, inventoryRowsCompared: listAvailable,
+    return { ...originals, ...(comparison && { independentInventory: comparison, retainedUnreleased: spool.unreleased }),
+      receiptsVerified, matchedDigests: matchedDigests.size, inventoryRowsCompared: listAvailable,
       digestGroupsWithMultiplePaths: [...matchedDigests].filter(key => byDigest.get(key).length > 1).length,
       receiptMediaPathsIndexed: indexed.size, receiptAttachmentPathsVerified: sidecarPaths,
       attachments, media, people: people.size, categories };

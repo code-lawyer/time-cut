@@ -16,7 +16,8 @@ use std::{
 
 pub(super) fn initialize(db: &Connection) -> Result<()> {
     db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS phone_lists(
+        "CREATE TABLE IF NOT EXISTS phone_run_scopes(run_id INTEGER PRIMARY KEY,scope TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS phone_lists(
         run_id INTEGER PRIMARY KEY, checked_at INTEGER NOT NULL, total INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS phone_list_items(
         run_id INTEGER NOT NULL, ordinal INTEGER NOT NULL, entry TEXT NOT NULL,
@@ -41,6 +42,41 @@ pub(super) fn initialize(db: &Connection) -> Result<()> {
         run_id INTEGER NOT NULL,parent TEXT NOT NULL,ordinal INTEGER NOT NULL,entry TEXT NOT NULL,
         version TEXT,size INTEGER,modified TEXT,PRIMARY KEY(run_id,parent,ordinal)) WITHOUT ROWID;",
     )?;
+    Ok(())
+}
+
+/// Invalidate live USB locators once when an existing run changes directory policy.
+/// Receipts, their backing files, Apple camera evidence, and completed runs remain usable.
+pub(super) fn apply_album_scope(db: &Connection, run: i64, source: &dyn Source, scope: &str) -> Result<()> {
+    let tx = db.unchecked_transaction()?;
+    let previous: Option<String> = tx.query_row(
+        "SELECT scope FROM phone_run_scopes WHERE run_id=?", [run], |r| r.get(0),
+    ).optional()?;
+    if previous.as_deref() == Some(scope) { return Ok(()); }
+    let key = source.identity();
+    // A previous unsupported/hidden folder must not remain a mandatory recovery target.
+    // Keep outstanding entries from the album even if this session temporarily omits them.
+    let has_pending: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='phone_pending')", [], |r| r.get(0),
+    )?;
+    for (table, column) in [("phone_directories", "path"), ("phone_pending", "entry")] {
+        if table == "phone_pending" && !has_pending { continue; }
+        let mut query = tx.prepare(&format!("SELECT DISTINCT {column} FROM {table} WHERE source=?"))?;
+        let paths = query.query_map([key], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut delete = tx.prepare(&format!("DELETE FROM {table} WHERE source=? AND {column}=?"))?;
+        for entry in paths {
+            if !source.album_path_in_scope(Path::new(&entry)) { delete.execute(params![key, entry])?; }
+        }
+    }
+    for table in ["phone_list_items", "phone_lists", "phone_list_folders", "phone_folder_items",
+        "phone_item_retries", "phone_usb_original_listings", "phone_returned_data"] {
+        tx.execute(&format!("DELETE FROM {table} WHERE run_id=?"), [run])?;
+    }
+    tx.execute("UPDATE phone_runs SET peak=0,scanned=0,covered=0,progress_at=NULL,
+        copies=0,bytes=0,compared=0,first_copy=NULL,sessions=0 WHERE id=?", [run])?;
+    tx.execute("INSERT OR REPLACE INTO phone_run_scopes(run_id,scope) VALUES(?,?)", params![run,scope])?;
+    tx.commit()?;
     Ok(())
 }
 

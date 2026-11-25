@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
+import { compareGalleryRun, galleryInbox, galleryScope } from './verify_timecut_android.mjs';
 
 const open = (filename, readOnly = true) => new DatabaseSync(filename, { readOnly, timeout: 5000 });
 const controlPath = profile => path.join(profile, 'import-control.sqlite3');
@@ -26,13 +27,20 @@ function pidRunning(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { if (error.code === 'ESRCH') return false; throw error; }
 }
 
-export function prepare({ root, archive, profile, deviceName, scenarioName, evidence, save }) {
+export function prepare({ root, archive, profile, deviceName, scenarioName, evidence, save, gallerySnapshot }) {
   const baseline = JSON.parse(fs.readFileSync(path.join(root, 'result.json'), 'utf8'));
   assert.equal(baseline.device, deviceName, 'The selected device differs from the saved acceptance root');
   if (evidence.scenario) {
     assert.equal(evidence.scenario, scenarioName);
     assert.equal(evidence.device, deviceName);
-    if (evidence.stage === 'passed') return false;
+    assert.equal(evidence.shellSha256 ?? null, gallerySnapshot?.inventorySha256 ?? null, 'Scenario scope or independent inventory changed');
+    if (evidence.stage === 'passed') {
+      if (gallerySnapshot) {
+        assert.equal(evidence.independentInventory?.inventorySha256, gallerySnapshot.inventorySha256);
+        assert.equal(evidence.independentInventory.matched, gallerySnapshot.entries);
+      }
+      return false;
+    }
   }
   assert.ok(!pidRunning(evidence.appPid) && !pidRunning(baseline.appPid),
     'Stop the previous acceptance application before resuming its isolated profile');
@@ -49,7 +57,8 @@ export function prepare({ root, archive, profile, deviceName, scenarioName, evid
     if (!evidence.scenario) {
       const last = db.prepare('SELECT id,safe_at FROM phone_runs ORDER BY id DESC LIMIT 1').get();
       const existing = last.safe_at === null;
-      save({ scenario: scenarioName, device: deviceName, owner: { library: owner.library, album: owner.album },
+      save({ scenario: scenarioName, device: deviceName, ...(gallerySnapshot && { shellSha256: gallerySnapshot.inventorySha256 }),
+        owner: { library: owner.library, album: owner.album },
         firstAllowedRunId: existing ? last.id : last.id + 1, targetRunId: existing ? last.id : null,
         resumedOpenRun: existing, stage: 'armed', started: new Date().toISOString() });
     } else {
@@ -74,7 +83,7 @@ export function selectedRun(db, evidence) {
   return loadRun(db).get(rows[0].id);
 }
 
-export async function measure({ archive, profile, evidence, save, version, invoke, usb, waitFor }) {
+export async function measure({ archive, profile, evidence, save, version, invoke, usb, waitFor, gallerySnapshot }) {
   const db = open(path.join(archive, '.time-cut', 'imports.sqlite3'));
   const control = open(controlPath(profile));
   const { library, album } = evidence.owner;
@@ -111,6 +120,12 @@ export async function measure({ archive, profile, evidence, save, version, invok
         AND json_extract(data,'$.source')=? AND json_extract(data,'$.inventory')=? ORDER BY id DESC LIMIT 1`)
       .get(run.safe_at, run.started, evidence.device, run.inventory), 'reading the published phone report', 60);
     const report = JSON.parse(terminal.data);
+    let independentInventory;
+    if (gallerySnapshot) {
+      assert.equal(report.album_scope, galleryScope);
+      independentInventory = compareGalleryRun(db, run.id, gallerySnapshot);
+      save({ independentInventory, lifetimeReceivedFiles: run.copies, lifetimeReceivedBytes: run.bytes });
+    }
     assert.ok(run.discovered > 0 && report.failed === 0 && report.pending === 0
       && report.rechecked === run.discovered && report.added + report.skipped === run.discovered);
     const coverage = db.prepare(`SELECT COUNT(*) AS listed,COUNT(m.digest) AS covered,COUNT(p.ordinal) AS reconciled
@@ -120,15 +135,23 @@ export async function measure({ archive, profile, evidence, save, version, invok
     assert.equal(db.prepare('SELECT total FROM phone_lists WHERE run_id=?').get(run.id).total, run.discovered);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM phone_manifest WHERE run_id=?').get(run.id).n, run.discovered);
     assert.ok(Object.values(coverage).every(n => n === run.discovered));
+    let retainedUnreleased;
     await waitFor(() => {
-      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM phone_local_retries').get().n, 0, 'Local receipts need repair');
-      return db.prepare('SELECT COUNT(*) AS n FROM phone_inbox').get().n === 0
-        && !control.prepare('SELECT 1 FROM phone_work WHERE library=? AND album=?').get(library, album);
+      if (independentInventory) {
+        const spool = galleryInbox(db, independentInventory);
+        if (spool.released || spool.outstanding) return false;
+        retainedUnreleased = spool.unreleased;
+      } else {
+        assert.equal(db.prepare('SELECT COUNT(*) AS n FROM phone_local_retries').get().n, 0, 'Local receipts need repair');
+        if (db.prepare('SELECT COUNT(*) AS n FROM phone_inbox').get().n) return false;
+      }
+      return !control.prepare('SELECT 1 FROM phone_work WHERE library=? AND album=?').get(library, album);
     }, 'filing all phone receipts', 3600, 1000);
     const filed = selectedRun(db, evidence);
     save({ stage: 'indexing', filedAt: evidence.filedAt ?? Date.now(), added: report.added, skipped: report.skipped,
       failed: report.failed, pending: report.pending, discovered: run.discovered, rechecked: report.rechecked,
-      ...coverage, filed: filed.filed, duplicates: filed.duplicates, localPending: 0 });
+      ...coverage, filed: filed.filed, duplicates: filed.duplicates, localPending: 0,
+      ...(independentInventory && { retainedUnreleased }) });
     const media = db.prepare('SELECT path FROM files').all().filter(row => !/\.(?:aae|xmp)$/i.test(row.path))
       .map(row => normalize(path.join(archive, row.path)));
     assert.ok(media.length, 'No archived media to verify in the catalog');
@@ -145,9 +168,10 @@ export async function measure({ archive, profile, evidence, save, version, invok
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  const [executable, root, deviceName, scenarioName] = process.argv.slice(2);
-  assert.ok(process.argv.length === 6, 'Expected executable, existing Android test root, Galaxy display name and scenario name');
-  process.argv = [process.execPath, process.argv[1], executable, root, '--android-device', deviceName, '--single-scan', scenarioName];
+  const [executable, root, deviceName, scenarioName, ...scopeArgs] = process.argv.slice(2);
+  assert.ok(scenarioName && (scopeArgs.length === 0 || (scopeArgs.length === 2 && scopeArgs[0] === '--gallery-snapshot')),
+    'Expected executable, existing Android test root, Galaxy display name, scenario name and optional --gallery-snapshot file');
+  process.argv = [process.execPath, process.argv[1], executable, root, '--android-device', deviceName, '--single-scan', scenarioName, ...scopeArgs];
   // Finish loading this module before the shared USB harness imports its scenario functions.
   import('./test_timecut_phone.mjs').catch(error => { console.error(error.message); process.exitCode = 1; });
 }

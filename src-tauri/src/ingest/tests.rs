@@ -330,6 +330,69 @@ fn capture_fixture(dest: &Path, phone: DeviceFixture, minimum: u64) -> super::Re
     )
 }
 
+#[test]
+fn narrowed_album_scope_resumes_an_open_run_and_releases_only_its_exact_members() {
+    struct Album(DeviceFixture);
+    impl Source for Album {
+        fn identity(&self) -> &str { self.0.identity() }
+        fn album_scope_version(&self) -> Option<&'static str> { Some("album-test-v1") }
+        fn album_path_in_scope(&self, path: &Path) -> bool { path.starts_with("DCIM") }
+        fn visit(&self, emit: &mut dyn FnMut(ScanEvent) -> Result<()>) -> Result<()> { self.0.visit(emit) }
+        fn reader(&self, item: &Item) -> Result<Box<dyn Read>> {
+            assert!(self.album_path_in_scope(&item.relative));
+            self.0.reader(item)
+        }
+        fn confirms_returned_object(&self, item: &Item) -> Result<bool> { self.0.confirms_returned_object(item) }
+    }
+    let temp = Sandbox::new();
+    let root = temp.dir("archive");
+    let old = [("DCIM/photo.jpg", b"old frame".as_slice()), ("Download/copy.jpg", b"new frame"),
+        ("Download/other.jpg", b"extra"), ("DCIM/missing.jpg", b"missing")];
+    let legacy = capture_fixture(&root, fixture(1, &old, Some(3)), 1);
+    assert!(legacy.safe_at.is_none());
+    assert_eq!(legacy.list_total, Some(4));
+    let db = Archive::open(&root).unwrap().db;
+    let run: i64 = db.query_row("SELECT id FROM phone_runs", [], |r| r.get(0)).unwrap();
+    db.execute_batch("INSERT INTO phone_pending(source,entry,signature,occurrence,family)
+        VALUES('fixture:serial-42','Download/absent.jpg','1/1',1,'Download/absent');
+        INSERT INTO phone_directories VALUES('fixture:serial-42','Download',9223372036854775807)").unwrap();
+    drop(db);
+    let scoped = |session, entries: &[(&str,&[u8])]| super::capture::receive(&root,"phone",|_| Ok(1),
+        || Ok(Box::new(Album(fixture(session,entries,None)))), |_|{}, ||Ok(()), ||Ok(()));
+    let current = [("DCIM/photo.jpg", b"new frame".as_slice()), ("DCIM/missing.jpg", b"missing")];
+    let partial = scoped(2,&current[..1]);
+    assert_eq!(partial.list_total, Some(1), "{:?}", partial.issues);
+    assert_eq!((partial.receive_attempt,partial.total_received,partial.total_received_bytes),(1,0,0));
+    let db = Archive::open(&root).unwrap().db;
+    let counters = db.query_row("SELECT first_copy,compared FROM phone_runs WHERE id=?", [run], |r|
+        Ok((r.get::<_,Option<i64>>(0)?,r.get::<_,u64>(1)?))).unwrap();
+    assert_eq!(counters, (None,partial.compared_bytes));
+    drop(db);
+    assert_eq!(partial.pending, 1);
+    assert!(partial.safe_at.is_none());
+    let done = scoped(3,&current);
+    assert!(done.safe_at.is_some(), "{:?}", done.issues);
+    let mut archive = Archive::open(&root).unwrap();
+    let ledger: (i64,i64,i64,i64) = archive.db.query_row(
+        "SELECT r.id,r.peak,l.total,(SELECT COUNT(*) FROM phone_manifest WHERE run_id=r.id)
+         FROM phone_runs r JOIN phone_lists l ON l.run_id=r.id WHERE r.safe_at IS NOT NULL",
+        [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    assert_eq!(ledger,(run,2,2,2));
+    assert_eq!(super::inbox::pending_local(&archive.db).unwrap(),2);
+    while super::inbox::file_next(&mut archive).unwrap().is_some() {}
+    super::inbox::recover(&archive).unwrap();
+    let kept = archive.db.prepare("SELECT entry,blob FROM phone_inbox WHERE released=0 ORDER BY entry").unwrap()
+        .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(kept.len(),3);
+    let spool = root.join(".time-cut").join("inbox");
+    for (entry,blob) in kept {
+        let expected = old.iter().find(|(p,_)| *p==entry).unwrap().1;
+        assert_eq!(fs::read(spool.join(blob)).unwrap(),expected);
+    }
+    assert_eq!(originals(&root).len(),2);
+}
+
 #[cfg(windows)]
 #[test]
 fn an_unaffordable_group_of_changed_jpeg_exports_does_not_consume_space_needed_for_originals() {
@@ -1185,7 +1248,8 @@ fn repeated_empty_sessions_retain_progress_and_the_full_inventory_floor() {
         device_key: Some("phone".into()), capture_started_at: Some(10), discovered: 2,
         added: 2, expected_minimum: Some(9), ..Default::default() };
     super::record_history(&db, &report).unwrap();
-    assert_eq!(super::verification::capture_minimum(&db, &dest, "phone").unwrap(), 9);
+    assert_eq!(super::verification::capture_minimum(&db, &dest, "phone", Some("android-albums-v1")).unwrap(), 4);
+    assert_eq!(super::verification::capture_minimum(&db, &dest, "phone", None).unwrap(), 9);
     report.discovered = 0;
     report.added = 0;
     report.phase = "手机媒体暂不可读".into();
@@ -1199,8 +1263,8 @@ fn repeated_empty_sessions_retain_progress_and_the_full_inventory_floor() {
     super::record_history(&db, &report).unwrap();
     assert_eq!(db.query_row("SELECT COUNT(*) FROM history", [], |r| r.get::<_,u32>(0)).unwrap(),3);
     db.execute("DELETE FROM history", []).unwrap();
-    assert_eq!(super::verification::capture_minimum(&db, &dest, "phone").unwrap(),9);
-    assert_eq!(super::verification::capture_minimum(&db, &dest, "other").unwrap(),0);
+    assert_eq!(super::verification::capture_minimum(&db, &dest, "phone", None).unwrap(),9);
+    assert_eq!(super::verification::capture_minimum(&db, &dest, "other", None).unwrap(),0);
 }
 
 #[test]

@@ -18,5 +18,7 @@ export function saveQaResult(project, directory, report, failed) {
   for (const target of targets) {
     if (fs.realpathSync(target) !== target) throw new Error(`QA cleanup encountered a redirected path ${target}`);
   }
-  for (const target of targets) fs.rmSync(target, { recursive: true, force: true, maxRetries: 8 });
+  for (const target of targets) {
+    fs.rmSync(target, { recursive: true, force: true, maxRetries: 16, retryDelay: 250 });
+  }
 }

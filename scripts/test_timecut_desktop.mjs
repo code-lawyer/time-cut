@@ -710,7 +710,12 @@ try {
   }
 } finally {
   socket?.close();
-  if (app.exitCode === null) app.kill();
+  if (app.exitCode === null && app.pid) {
+    // Stop the test app's WebView2 children before removing its isolated profile.
+    const stopped = process.platform === 'win32' && spawnSync('taskkill.exe',
+      ['/PID', String(app.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 }).status === 0;
+    if (!stopped) app.kill();
+  }
   await appClosed;
   await new Promise(resolve => stdout.end(resolve));
   saveQaResult(project, qa, tempResult, failure);

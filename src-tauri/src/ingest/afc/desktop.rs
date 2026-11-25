@@ -1,6 +1,6 @@
 //! Select the original camera source for the normal Windows import worker.
 use super::{Phone, attached, runtime, same_hardware, supplement};
-use crate::ingest::{Report, Target, TransferStop, View, archive::Result, job};
+use crate::ingest::{ImportSource, Report, Target, TransferStop, View, archive::Result, job};
 use rusqlite::{Connection, OpenFlags};
 use std::{net::{Ipv4Addr, SocketAddr, TcpStream}, path::Path, sync::{Arc, Mutex}, time::Duration};
 use tauri::AppHandle;
@@ -71,7 +71,11 @@ pub(in crate::ingest) fn receive(
                 let mut live = view.lock().unwrap();
                 if !live.devices.iter().any(|name| name == label) { live.devices.push(label.into()); }
             }
-            let report = job(app,view,dest,label,true,|| Ok(Box::new(phone)),|| {
+            let source = ImportSource::Phone {
+                label,
+                open: Box::new(move || Ok(Box::new(phone))),
+            };
+            let report = job(app,view,dest,source,|| {
                 match view.lock().unwrap().target.as_ref() {
                     Some(current) if current == dest => Ok(()),
                     Some(current) if current.auto => Err(TransferStop::DestinationChanged.into()),

@@ -644,11 +644,13 @@ fn copy_folder<Guard>(
     report
 }
 
-#[derive(Clone, Copy)]
 enum ImportSource<'a> {
     Folder(&'a Path),
     #[cfg(windows)]
-    Phone(&'a wpd::Device),
+    Phone {
+        label: &'a str,
+        open: Box<dyn FnOnce() -> Result<Box<dyn Source>> + 'a>,
+    },
 }
 
 fn job(
@@ -658,10 +660,10 @@ fn job(
     source: ImportSource<'_>,
     check_active: impl FnMut() -> Result<()>,
 ) -> Result<Report> {
-    let (label, phone) = match source {
-        ImportSource::Folder(path) => (path.to_string_lossy(), false),
+    let (label, phone) = match &source {
+        ImportSource::Folder(path) => ((*path).to_string_lossy(), false),
         #[cfg(windows)]
-        ImportSource::Phone(device) => (std::borrow::Cow::Borrowed(device.name.as_str()), true),
+        ImportSource::Phone { label, .. } => (std::borrow::Cow::Borrowed(*label), true),
     };
     // A crash may occur after publishing an original and before requesting an index. The
     // durable marker covers this entire window and disappears in the completion transaction.
@@ -711,11 +713,11 @@ fn job(
     let mut report = match source {
         ImportSource::Folder(path) => copy_folder(root, path, progress, guard, check_active),
         #[cfg(windows)]
-        ImportSource::Phone(device) => capture::receive(
+        ImportSource::Phone { open, .. } => capture::receive(
             root,
             &label,
             |(key, scope)| verification::capture_minimum(&db, dest, key, scope),
-            || Ok(Box::new(wpd::Phone::open(device)?)),
+            open,
             progress,
             guard,
             check_active,
@@ -940,7 +942,10 @@ fn worker(app: &AppHandle, view: &Arc<Mutex<View>>, rx: &mpsc::Receiver<Wake>) -
                             app,
                             view,
                             &dest,
-                            ImportSource::Phone(&d),
+                            ImportSource::Phone {
+                                label: &d.name,
+                                open: Box::new(|| Ok(Box::new(wpd::Phone::open(&d)?))),
+                            },
                             || {
                                 {
                                     let live = view.lock().unwrap();

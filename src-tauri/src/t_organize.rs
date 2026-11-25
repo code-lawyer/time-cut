@@ -456,7 +456,7 @@ pub fn timecut_scene_status(
             error: (view.library == library)
                 .then(|| view.error.clone())
                 .flatten(),
-            library,
+            library: library.clone(),
             summary,
         })
     })

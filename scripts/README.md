@@ -4,6 +4,18 @@ Utility scripts for the Lap project.
 
 ## Windows phone import acceptance
 
+For a connected Android phone, select **File transfer** and run the packaged EXE against an isolated local archive. Pass the exact name printed by `Time-cut.exe --probe-devices`.
+
+```powershell
+node scripts/test_timecut_phone.mjs <exe> --android-device "Galaxy S21 5G"
+```
+
+The runner prints the test directory under `.timecut-build/android-full-*`. To resume a stopped run, insert that directory after the EXE argument. The full test checks intake, local filing, per-file BLAKE3, album membership, a second scan of the same phone, local-folder deduplication and on-device media decoding on the PC. To check the Windows Shell view independently, capture a snapshot with `measure_timecut_android_inventory.ps1` and compare it offline with an explicit completed run ID.
+
+For a stalled Android import, close the isolated application to release the USB session, then run `verify_android_source_samples.ps1 -ArchiveRoot <archive> -RunId <id> -InboxOnly` under `pwsh -STA`. The default sample compares source and inbox bytes. Add `-SampleGroup Pending` to inspect unresolved files. A matching sample establishes byte integrity for the selected file.
+
+To test additions, duplicates, same-name files, sidecars and a same-length replacement on a Samsung phone, use `test_android_mtp_fixture.ps1` with the same local receipt throughout. Run `prepare` offline, then `seed`. Build the empty-directory helper and run its `bind` command while the ownership marker is still present. Scan the seeded phone, run `mutation`, then scan again. On a successful whole-device baseline, `verify_android_fixture_run.py` compares the three completed run IDs with the receipt. When a separate file blocks the whole device, the opt-in Rust test `owned_android_fixture_capture_and_repeat` can exercise the generated directory on its own. Run that test once after seed and once after mutation. Finish with the fixture script's `cleanup` and the bound directory helper's `remove`. The scripts' header examples show the arguments.
+
 For an existing Time-cut profile with one archived phone, `Time-cut.exe --resume-verify-phone N` enables automatic import into the configured archive and requests a verification scan once at least `N` items are visible. Set `N` to the count from the earlier device scan. The normal tray application owns the request across launches. A second complete scan must add zero files and match every source path and content digest, including companion files. The bounded desktop test in `test_timecut_iphone.mjs` remains available for interactive diagnostics.
 
 ## 1. download_models

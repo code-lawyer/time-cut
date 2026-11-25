@@ -1,5 +1,8 @@
 //! In-process WPD provider for the interfaces consumed by Phone::visit and Phone::reader.
 //! Nothing is registered with the system. Enumeration, values, and streams cross the COM ABI.
+#[path = "fixture_acceptance.rs"]
+mod fixture_acceptance;
+
 use super::*;
 use crate::ingest::{
     archive::Folder,

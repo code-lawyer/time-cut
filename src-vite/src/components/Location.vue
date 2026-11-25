@@ -55,13 +55,13 @@
             ]"
           >
             <button type="button" class="p-1 shrink-0 rounded focus-visible:outline-primary"
-              :aria-label="location.admin1" :aria-expanded="location.is_expanded || hasSearch"
+              :aria-label="regionLabel(location)" :aria-expanded="location.is_expanded || hasSearch"
               @click="clickExpandLocation(location)">
               <IconRight :class="['w-4 h-4 transition-transform', (location.is_expanded || hasSearch) ? 'rotate-90' : '']" />
             </button>
             <button type="button" class="flex flex-1 min-w-0 h-full items-center text-start rounded focus-visible:outline-primary"
               :aria-pressed="regionSelected(location) && !libConfig.location.name" @click="clickLocationAdmin1(location)">
-              <span class="sidebar-item-label">{{ location.admin1 + (location.cc ? ', ' + getCountryName(location.cc, locale) : '') }}</span>
+              <span class="sidebar-item-label">{{ regionLabel(location) }}</span>
               <span class="sidebar-item-count">{{ location.counts.reduce((a: number, b: number) => a + b, 0).toLocaleString() }}</span>
             </button>
           </div>
@@ -113,7 +113,12 @@ const props = defineProps({
   }
 });
 
-const { locale } = useI18n();
+const { locale, t } = useI18n();
+
+function regionLabel(location: { cc: string; admin1: string }) {
+  return [location.admin1, location.cc && getCountryName(location.cc, locale.value)].filter(Boolean).join(', ')
+    || t('search.unknown_location');
+}
 
 const locations = ref<any[]>([]);
 const isLoadingLocations = ref(true);
@@ -169,9 +174,9 @@ onMounted(async () => {
       (libConfig.location as any).name = null;
     }
     
-    if (!libConfig.location.admin1 && locations.value.length > 0) {
+    if (libConfig.location.admin1 == null && locations.value.length > 0) {
       clickLocationAdmin1(locations.value[0]);
-    } else if(libConfig.location.cc && libConfig.location.admin1 && libConfig.location.name) {
+    } else if(libConfig.location.admin1 != null && libConfig.location.name) {
       const location = locations.value.find(regionSelected);
       if(location) {
         location.is_expanded = true;     // expand selected location
@@ -204,7 +209,7 @@ function regionSelected(location: { cc: string; admin1: string }) {
 }
 
 function restoreLocationSelection() {
-  if (!libConfig.location.admin1) return;
+  if (libConfig.location.admin1 == null) return;
 
   const location = locations.value.find(regionSelected);
 

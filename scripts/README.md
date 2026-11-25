@@ -36,7 +36,7 @@ Downloads CLIP, YuNet and SFace to `src-tauri/resources/models/`. Both scripts p
 
 Downloads FFmpeg and FFprobe sidecar binaries for the current platform into `src-tauri/resources/ffmpeg/`. This ensures the packaged app can include the sidecar binaries with releases built from source.
 
-The Bash script pins numeric GitHub asset IDs and verifies SHA-256 for both existing Linux architectures, including pre-staged files. Other platforms retain their existing release URLs without checksum verification. Fresh downloads fail on HTTP errors and use temporary files before promotion. See [build-input provenance and checksum maintenance](../contrib/aur/README.md); this does not add Arch ARM packaging support.
+The Windows PowerShell downloader pins GitHub asset IDs and verifies SHA-256 for cached and new x64 and ARM64 executables. The Bash script checks the same Windows assets as well as both supported Linux architectures. macOS downloads use the release URLs. Fresh downloads fail on HTTP errors and use temporary files before promotion. See [build-input provenance and checksum maintenance](../contrib/aur/README.md); this does not add Arch ARM packaging support.
 
 ### Usage
 
@@ -66,3 +66,14 @@ Run `python -m unittest discover` from the repository root to discover the downl
 These tests execute the actual Bash downloaders in temporary layouts, replacing only the network transport to exercise corrupt caches, corrupt successful responses, and failed transfers. Real upstream clean-download/cache smoke evidence is recorded in the Phase 1 verification artifact under `.context/`.
 
 `.github/workflows/test-downloaders.yml` runs Bash syntax checks and the downloader-only suite on Linux and macOS for pull requests and `main` pushes that change `scripts/**` or that workflow. It also supports manual dispatch. The suite uses no upstream downloads or build secrets.
+
+## Native media compatibility tests
+
+From the repository root, build the native test executable in the project's configured Rust build environment. Use the executable path printed by Cargo as the argument to the Python 3.8+ runner.
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --locked --release --no-run
+python scripts/test_timecut_compat.py "<test executable path printed by Cargo>"
+```
+
+The first run downloads a real iPhone HEIC/MOV Live Photo pair from the [osxphotos test collection](https://github.com/RhetTbull/osxphotos/tree/e51a1570d39bf999eb37434a63f741e909f95b30/tests/test-images) and Nikon D300 and E5700 NEFs from [RAW-Samples](https://www.rawsamples.ch/). Each download is pinned by SHA-256 and cached in `.timecut-build/public-media-cache`. A populated cache supports offline runs. The runner stages copies in a temporary folder, adds two repository JPEGs for companion and deduplication scenarios, and truncates a copy of the D300 file to exercise the embedded-preview fallback. It executes all seven ignored tests in isolated processes and reports each result.

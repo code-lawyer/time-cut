@@ -54,8 +54,23 @@ case "$OS_TYPE" in
     esac
     ;;
   MINGW*|MSYS*|CYGWIN*|Windows_NT|windows|windows-*)
-    FFMPEG_FILE="ffmpeg-x86_64-pc-windows-msvc.exe"
-    FFPROBE_FILE="ffprobe-x86_64-pc-windows-msvc.exe"
+    case "$ARCH_TYPE" in
+      x86_64|x64|AMD64)
+        TRIPLE=x86_64
+        FFMPEG_ASSET=405019646
+        FFPROBE_ASSET=405019652
+        FFMPEG_SHA256=1a65d5b0b10d8d9a81d2824a3538046a40ed3607c906b335a166add87613f705
+        FFPROBE_SHA256=54b944d6095c4588d7548424d7acd5118390a9d4f01b1c92f841547fc9a7429c ;;
+      aarch64|arm64|ARM64)
+        TRIPLE=aarch64
+        FFMPEG_ASSET=405019640
+        FFPROBE_ASSET=405019641
+        FFMPEG_SHA256=2cc705fb32146906817c8bd0dd599f5b6f09146c003728420d0fa60617b32708
+        FFPROBE_SHA256=22ad65e855310b2c6c0f8f9858f6fd7fe69788f7265fc12abd8d21455bcfbb5c ;;
+      *) echo "Unsupported Windows architecture: $ARCH_TYPE" >&2; exit 1 ;;
+    esac
+    FFMPEG_FILE="ffmpeg-$TRIPLE-pc-windows-msvc.exe"
+    FFPROBE_FILE="ffprobe-$TRIPLE-pc-windows-msvc.exe"
     ;;
   *)
     echo "Unsupported platform: $OS_TYPE"
@@ -69,7 +84,7 @@ DOWNLOADS=(
 )
 
 # Linux asset identities and hashes are documented in contrib/aur/README.md.
-# Non-Linux downloads retain their existing release URLs and integrity scope.
+# Windows assets use the same pinned IDs and checksums as the PowerShell downloader.
 if command -v sha256sum >/dev/null 2>&1; then
   SHA256=(sha256sum)
 else

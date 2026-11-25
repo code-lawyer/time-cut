@@ -96,6 +96,13 @@ test('JPEG export storage limits show required and available space and keep orig
   assert.doesNotMatch(html, /data-testid="originals-safe"/);
 });
 
+test('an outstanding local filing error supersedes an earlier release and repeat', async () => {
+  const html = await render({ local_errors: 1, local_error: '示例原件校验失败', safe_at: started, verified: true });
+  assert.match(html, /有 1 项本地收件尚未归档/);
+  assert.match(html, /示例原件校验失败/);
+  assert.doesNotMatch(html, /data-testid="originals-safe"|全量复扫完成/);
+});
+
 test('offline receipts show the saved count without an unplug notice', async () => {
   const html = await render({ phase: '已核对本机接收记录', list_total: 12, list_covered: 7, newly_verified: 3 });
   assert.match(html, /从现有备份确认了 3 项/);

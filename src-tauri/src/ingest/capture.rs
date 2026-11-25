@@ -663,6 +663,7 @@ pub(super) fn receive<Guard>(
             params![safe_at, report.discovered, digest, run],
         )?;
         report.local_pending = inbox::pending_local(&tx)?;
+        inventory::compact_folder_checkpoints(&tx, key)?;
         tx.commit()?;
         report.safe_at = Some(safe_at);
         report.inventory = Some(digest);

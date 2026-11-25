@@ -8,6 +8,7 @@ import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DatabaseSync } from 'node:sqlite';
+import { verifyLocalGallery } from './verify_timecut_archive.mjs';
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const executable = path.resolve(process.argv[2]);
@@ -343,6 +344,16 @@ async function verifyOrganizer(library, fixtures) {
     assert.equal(geometry.e_orientation, 6);
     assert.ok(geometry.width > geometry.height, 'Catalog dimensions follow the display orientation');
     await inspect('rename_person', { personId: identity, name: '样本人物甲' });
+    const version = catalog.prepare('SELECT modified_at,has_faces FROM afiles WHERE name=?');
+    const previousTime = version.get('portrait-a.jpg').modified_at;
+    const originalStat = fs.statSync(rotatedPortrait);
+    fs.utimesSync(rotatedPortrait, originalStat.atime, new Date(originalStat.mtimeMs - 60000));
+    await inspect('timecut_folder', { path: input, indexOnly: true });
+    await waitFor(() => {
+      const row = version.get('portrait-a.jpg');
+      return row?.modified_at !== previousTime && row?.has_faces === 1 && identities.get('portrait-a.jpg');
+    }, 'redetection of the sole named portrait after only its file time changes', 130000);
+    assert.equal(identities.get('portrait-a.jpg').person_id, identity);
     await inspect('timecut_folder', { path: followUp, indexOnly: true });
     await waitFor(() => identities.get(path.basename(variant))?.person_id, 'automatic grouping on a later import', 130000);
     assert.equal(identities.get(path.basename(variant)).person_id, identity);
@@ -393,6 +404,7 @@ async function verifyOrganizer(library, fixtures) {
     await send('Emulation.clearDeviceMetricsOverride');
     await evaluate("document.documentElement.setAttribute('data-theme','dark')");
     return {
+      namedPortraitSurvivesTimestampChange: true,
       namesSurviveIncrementalGrouping: true,
       differentPeopleSeparated: true,
       peopleOnRotatedJpeg: true,
@@ -637,6 +649,10 @@ try {
   if (process.env.TIMECUT_QA_ORGANIZER_FIXTURES) {
     tempResult.checks.organizer = await verifyOrganizer(target.library, process.env.TIMECUT_QA_ORGANIZER_FIXTURES);
   }
+  tempResult.checks.readOnlyVerification = verifyLocalGallery(executable, archive, data);
+  const verifiedTarget = (await inspect('timecut_status')).target;
+  assert.equal(verifiedTarget.auto, target.auto);
+  assert.equal(verifiedTarget.root, target.root);
   // Exercise catalog actions through the packaged application's native commands.
   // All catalog IDs and paths in this section belong to this run's isolated profile.
   const additional = await inspect('add_library', { name: '第二个测试图库' });

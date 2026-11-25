@@ -648,10 +648,12 @@ function flattenMakeModelOptions(items: any[]) {
 function flattenLocationOptions(items: any[]) {
   const options: any[] = [];
   for (const item of items) {
-    if (!item.admin1) continue;
-    options.push({ value: `${item.cc || ''}||${item.admin1}||`, label: item.admin1 });
+    const label = item.admin1 || item.cc || t('search.unknown_location');
+    const region = `${item.cc || ''}||${item.admin1 || ''}||`;
+    const suffix = item.admin1 ? '' : '||regionless';
+    options.push({ value: region + suffix, label });
     for (const name of item.names || []) {
-      options.push({ value: `${item.cc || ''}||${item.admin1}||${name}`, label: `${item.admin1} › ${name}` });
+      options.push({ value: region + name + suffix, label: `${label} › ${name}` });
     }
   }
   return options;

@@ -7,8 +7,8 @@
         <img :src="iconLogo" class="w-20 h-20 select-none [-webkit-app-region:no-drag]" draggable="false" />
       </div>
       <div class="flex flex-col text-left">
-        <h3 class="text-xl">{{ packageInfo.name }}</h3>
-        <p class="mt-2 text-sm">{{ $t('settings.about.package.app_description') }}</p>
+        <h3 class="text-xl">Time-cut</h3>
+        <p class="mt-2 text-sm">{{ $t('timecut.aboutDescription') }}</p>
       </div>
     </div>
 
@@ -41,49 +41,35 @@
             {{ $t('settings.about.package.link') }}
           </div>
           <div class="flex flex-wrap items-center justify-start">
-            <!-- <a
-              :href="packageInfo.homepage"
-              target="_blank"
-              class="inline-flex items-center gap-1.5 rounded-box px-2 py-1 text-xs transition-colors hover:bg-base-100/50 hover:text-primary"
-            >
-              <IconLink class="t-icon-size-sm" />
-              <span>{{ $t('settings.about.package.website') }}</span>
-            </a> -->
-            <a
-              :href="packageInfo.repository"
-              target="_blank"
-              class="inline-flex items-center gap-1.5 rounded-box px-2 py-1 text-xs transition-colors hover:bg-base-100/50 hover:text-primary"
-            >
-              <IconGithub class="t-icon-size-sm" />
-              <span>{{ $t('settings.about.package.github') }}</span>
+            <a href="https://github.com/julyx10/lap/tree/v0.4.1" target="_blank" rel="noopener noreferrer"
+              class="inline-flex items-center gap-1.5 rounded-box px-2 py-1 text-xs hover:text-primary">
+              <IconGithub class="t-icon-size-sm" /> Lap v0.4.1
             </a>
-            <a
-              :href="issuesUrl"
-              target="_blank"
-              class="inline-flex items-center gap-1.5 rounded-box px-2 py-1 text-xs transition-colors hover:bg-base-100/50 hover:text-primary"
-            >
-              <IconFocus class="t-icon-size-sm" />
-              <span>{{ $t('settings.about.package.feedback') }}</span>
-            </a>
-            <a
-              :href="privacyUrl"
-              target="_blank"
-              class="inline-flex items-center gap-1.5 rounded-box px-2 py-1 text-xs transition-colors hover:bg-base-100/50 hover:text-primary"
-            >
-              <IconLock class="t-icon-size-sm" />
-              <span>{{ $t('settings.about.package.privacy') }}</span>
+            <a v-if="projectRepository" :href="projectRepository + '/issues'" target="_blank" rel="noopener noreferrer"
+              class="inline-flex items-center gap-1.5 rounded-box px-2 py-1 text-xs hover:text-primary">
+              <IconFocus class="t-icon-size-sm" /> {{ $t('settings.about.package.feedback') }}
             </a>
           </div>
         </div>
       </div>
     </div>
 
+    <details class="w-full rounded-box bg-base-300/30 p-3 text-sm">
+      <summary class="cursor-pointer">{{ $t('settings.about.package.privacy') }}</summary>
+      <p class="mt-2">{{ $t('timecut.privacySummary') }}</p>
+      <div v-for="(part, i) in privacyParagraphs" :key="i" class="mt-2">
+        <strong v-if="part.startsWith('#')">{{ part.replace(/^#+\s*/, '') }}</strong>
+        <p v-else>{{ part }}</p>
+      </div>
+    </details>
+
     <!-- updates -->
     <div class="w-full rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
       <div class="flex items-center gap-2 text-base-content/30">
         <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.about.section_updates') }}</span>
       </div>
-      <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+      <p v-if="!updaterEnabled" class="px-1 text-sm">{{ $t('timecut.updateNotice') }}</p>
+      <div v-else class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
         <div class="min-w-0 flex-1 flex flex-col gap-0.5 text-sm leading-5">
           <div>{{ updateStatusText }}</div>
           <progress
@@ -102,7 +88,7 @@
           <span v-else>{{ updateButtonText }}</span>
         </button>
       </div>
-      <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+      <div v-if="updaterEnabled" class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
         <div class="flex flex-col gap-0.5 text-sm leading-5">
           <div>{{ $t('settings.general.auto_check_updates') }}</div>
         </div>
@@ -116,9 +102,10 @@
 import { computed, ref, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { getPackageInfo, getBuildTime } from '@/common/api';
-import { useAppUpdater } from '@/common/updater';
+import { useAppUpdater, updaterEnabled, projectRepository } from '@/common/updater';
 import { config } from '@/common/config';
-import { IconGithub, IconLink, IconLock, IconFocus } from '@/common/icons';
+import { IconGithub, IconFocus } from '@/common/icons';
+import privacy from '../../../PRIVACY.md?raw';
 import iconLogo from '@/assets/images/icon.png';
 
 const packageInfo = ref<any>({
@@ -137,16 +124,7 @@ const displayVersion = computed(() => {
   const commitHash = packageInfo.value.commit_hash || packageInfo.value.commitHash || '';
   return commitHash ? `${version} (${commitHash})` : version;
 });
-const privacyUrl = computed(() => {
-  const repo = packageInfo.value.repository || '';
-  if (!repo) return 'https://github.com/julyx10/lap/blob/main/PRIVACY.md';
-  return repo.endsWith('/') ? `${repo}blob/main/PRIVACY.md` : `${repo}/blob/main/PRIVACY.md`;
-});
-const issuesUrl = computed(() => {
-  const repo = packageInfo.value.repository || '';
-  if (!repo) return 'https://github.com/julyx10/lap/issues';
-  return repo.endsWith('/') ? `${repo}issues` : `${repo}/issues`;
-});
+const privacyParagraphs = privacy.trim().split(/\r?\n\s*\r?\n/);
 const { locale, messages } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 const {

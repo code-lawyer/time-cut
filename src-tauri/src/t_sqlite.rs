@@ -3274,6 +3274,8 @@ impl AFile {
             params![file_id, file.size, file.modified_at, file.inode], |row| row.get(0),
         ).optional().map_err(|e| e.to_string())?.unwrap_or(false);
         if changed_content {
+            crate::t_face::refresh::remember_assignments(&tx, file_id).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM face_retries WHERE file_id=?1", [file_id]).map_err(|e| e.to_string())?;
             tx.execute("UPDATE persons SET thumbnail=NULL WHERE id IN
               (SELECT person_id FROM faces WHERE file_id=?1)", [file_id]).map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM faces WHERE file_id=?1", [file_id]).map_err(|e| e.to_string())?;
@@ -5593,12 +5595,13 @@ impl AFile {
             }
         }
 
-        if !params.location_admin1.is_empty() {
+        if params.location_cc.is_some() || !params.location_admin1.is_empty() {
             if let Some(country) = &params.location_cc {
                 conditions.push("COALESCE(a.geo_cc, '') = ?".to_string());
                 sql_params.push(Box::new(country.clone()));
             }
-            conditions.push("a.geo_admin1 = ?".to_string());
+            conditions.push("COALESCE(a.geo_admin1, '') = ?".to_string());
+            conditions.push("COALESCE(a.geo_name, '') <> ''".to_string());
             sql_params.push(Box::new(params.location_admin1.clone()));
             if !params.location_name.is_empty() {
                 conditions.push("a.geo_name = ?".to_string());
@@ -6699,7 +6702,10 @@ impl AFile {
                         }
                     }
                     "location" => {
-                        if let Some(cc) = parts.get(0).filter(|v| !v.is_empty()) {
+                        if parts.get(3) == Some(&"regionless") {
+                            conditions.push("COALESCE(a.geo_admin1, '') = '' AND COALESCE(a.geo_name, '') <> '' AND COALESCE(a.geo_cc, '') = ?".to_string());
+                            sql_params.push(Box::new((*parts[0]).to_string()));
+                        } else if let Some(cc) = parts.get(0).filter(|v| !v.is_empty()) {
                             conditions.push("a.geo_cc = ?".to_string());
                             sql_params.push(Box::new((*cc).to_string()));
                         }
@@ -9723,6 +9729,8 @@ impl Person {
     pub fn delete(person_id: i64) -> Result<usize, String> {
         let conn = open_conn()?;
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        tx.execute("UPDATE face_refresh_assignments SET excluded=1 WHERE person_id=?1", [person_id])
+            .map_err(|e| e.to_string())?;
         tx.execute(
             "INSERT OR IGNORE INTO face_group_exclusions(face_id) SELECT id FROM faces WHERE person_id=?1",
             [person_id],
@@ -9811,7 +9819,7 @@ impl Face {
         conn.execute("BEGIN TRANSACTION", params![])
             .map_err(|e| e.to_string())?;
 
-        if let Err(e) = conn.execute("DELETE FROM faces", params![]) {
+        if let Err(e) = conn.execute_batch("DELETE FROM face_refresh_assignments; DELETE FROM face_retries; DELETE FROM faces;") {
             let _ = conn.execute("ROLLBACK", params![]);
             return Err(e.to_string());
         }
@@ -9877,19 +9885,29 @@ impl Face {
         )
     }
 
-    pub(crate) fn has_work() -> Result<bool, String> {
-        let conn = open_conn()?;
+    pub(crate) fn has_unassigned(conn: &Connection) -> Result<bool, String> {
         conn.query_row(&format!(
-            "SELECT EXISTS(SELECT 1 FROM afiles a JOIN afolders b ON b.id=a.folder_id
-               WHERE {} AND COALESCE(a.has_faces,0)=0)
-             OR EXISTS(SELECT 1 FROM faces f JOIN afiles a ON a.id=f.file_id JOIN afolders b ON b.id=a.folder_id
-               WHERE {} AND f.person_id IS NULL AND length(f.embedding)=?1 AND NOT EXISTS
-               (SELECT 1 FROM face_group_exclusions e WHERE e.face_id=f.id))",
-            Self::visible_images(), Self::visible_images(),
+            "SELECT EXISTS(SELECT 1 FROM faces f JOIN afiles a ON a.id=f.file_id JOIN afolders b ON b.id=a.folder_id
+             WHERE {} AND f.person_id IS NULL AND length(f.embedding)=?1 AND NOT EXISTS
+             (SELECT 1 FROM face_group_exclusions e WHERE e.face_id=f.id))", Self::visible_images(),
         ), [crate::t_cluster::EMBEDDING_BYTES], |row| row.get(0)).map_err(|e| e.to_string())
     }
 
-    pub(crate) fn get_unprocessed_image_files() -> Result<Vec<FaceTarget>, String> {
+    const AUTO_READY: &'static str = "NOT EXISTS (SELECT 1 FROM face_retries r WHERE r.file_id=a.id
+            AND (r.retry_at IS NULL OR r.retry_at > unixepoch()))";
+
+    pub(crate) fn scheduled_work() -> Result<(bool, Option<u64>), String> {
+        let conn = open_conn()?;
+        let retry = conn.query_row("SELECT min(retry_at)-unixepoch() FROM face_retries
+            WHERE retry_at > unixepoch()", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        let ready: bool = conn.query_row(&format!(
+            "SELECT EXISTS(SELECT 1 FROM afiles a JOIN afolders b ON b.id=a.folder_id
+               WHERE {} AND COALESCE(a.has_faces,0)=0 AND {})", Self::visible_images(), Self::AUTO_READY,
+        ), [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        Ok((ready || Self::has_unassigned(&conn)?, retry))
+    }
+
+    pub(crate) fn get_unprocessed_image_files(automatic: bool) -> Result<Vec<FaceTarget>, String> {
         let conn = open_conn()?;
         let mut stmt = conn
             .prepare(&format!(
@@ -9897,8 +9915,8 @@ impl Face {
                         a.file_type, COALESCE(a.e_orientation,1)
                  FROM afiles a 
                  JOIN afolders b ON a.folder_id = b.id
-                 WHERE {} AND COALESCE(a.has_faces,0)=0
-                 ORDER BY a.id", Self::visible_images(),
+                 WHERE {} AND COALESCE(a.has_faces,0)=0 AND {}
+                 ORDER BY a.id", Self::visible_images(), if automatic { Self::AUTO_READY } else { "1" },
             ))
             .map_err(|e| e.to_string())?;
 
@@ -9917,6 +9935,11 @@ impl Face {
         Ok(files)
     }
 
+    pub(crate) fn defer_detection(target: &FaceTarget) -> Result<(), String> {
+        let conn = open_conn()?;
+        crate::t_face::refresh::defer(&conn, target).map_err(|e| e.to_string())
+    }
+
     /// Publish the faces and mark the exact indexed revision complete together.
     pub(crate) fn store_detection(target: &FaceTarget, faces: &[crate::t_face::FaceData]) -> Result<bool, String> {
         let conn = open_conn()?;
@@ -9927,10 +9950,12 @@ impl Face {
             params![if faces.is_empty() { 2 } else { 1 }, target.id, target.modified_at, target.size],
         ).map_err(|e| e.to_string())?;
         if changed == 0 { return Ok(false); }
+        let mut ids = Vec::with_capacity(faces.len());
         for face in faces {
             let bbox = serde_json::to_string(&face.bbox).map_err(|e| e.to_string())?;
-            Self::add_with_conn(&tx, target.id, &bbox, &face.embedding)?;
+            ids.push(Self::add_with_conn(&tx, target.id, &bbox, &face.embedding)?);
         }
+        crate::t_face::refresh::restore(&tx, target.id, &ids, faces).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(true)
     }
@@ -10136,16 +10161,19 @@ impl ALocation {
     // get all location admin1 and names from db
     pub fn get_from_db(sort: i64) -> Result<Vec<Self>, String> {
         let conn = open_conn()?;
+        Self::list(&conn, sort)
+    }
 
-        let query = format!("SELECT COALESCE(a.geo_cc, ''), a.geo_admin1, a.geo_name, count(a.id) as count
+    fn list(conn: &Connection, sort: i64) -> Result<Vec<Self>, String> {
+        let query = format!("SELECT COALESCE(a.geo_cc, ''), COALESCE(a.geo_admin1, ''), a.geo_name, count(a.id) as count
             FROM afiles a
             JOIN afolders b ON a.folder_id = b.id
-            WHERE COALESCE(a.geo_admin1, '') <> '' AND COALESCE(a.geo_name, '') <> ''
+            WHERE COALESCE(a.geo_name, '') <> ''
                 AND a.id NOT IN (
                     SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
                 ){} AND {}
-            GROUP BY a.geo_cc, a.geo_admin1, a.geo_name
-            ORDER BY a.geo_cc, a.geo_admin1, a.geo_name", AFile::album_filter_sql("a"), AFile::search_exclusion_condition("b"));
+            GROUP BY 1, 2, 3
+            ORDER BY 1, 2, 3", AFile::album_filter_sql("a"), AFile::search_exclusion_condition("b"));
 
         let mut stmt = conn.prepare(query.as_str()).map_err(|e| e.to_string())?;
 
@@ -10926,6 +10954,7 @@ fn create_db_internal() -> Result<(), String> {
         [],
     ).map_err(|e| e.to_string())?;
 
+    crate::t_face::refresh::init(&conn).map_err(|e| e.to_string())?;
     crate::t_organize::init(&conn).map_err(|e| e.to_string())?;
 
     // file hashes table (for deduplication)
@@ -11123,6 +11152,36 @@ mod tag_tree_query_tests {
 #[cfg(test)]
 mod album_filter_tests {
     use super::*;
+
+    #[test]
+    fn regionless_places_are_listed_and_select_only_matching_named_files() {
+        let db = fixture();
+        db.execute_batch("ALTER TABLE afolders ADD COLUMN is_excluded_from_search INTEGER DEFAULT 0;
+            ALTER TABLE afiles ADD COLUMN geo_cc TEXT;
+            ALTER TABLE afiles ADD COLUMN geo_admin1 TEXT;
+            ALTER TABLE afiles ADD COLUMN geo_name TEXT;
+            UPDATE afiles SET geo_cc='XX',geo_name='Town' WHERE id IN (7,8,10);
+            UPDATE afiles SET geo_admin1='' WHERE id=8;
+            UPDATE afiles SET geo_admin1='North' WHERE id=10;").unwrap();
+        let locations = ALocation::list(&db, 0).unwrap();
+        let regionless = locations.iter().find(|l| l.cc=="XX" && l.admin1.is_empty()).unwrap();
+        assert_eq!(regionless.names, ["Town"]);
+        assert_eq!(regionless.counts, [2]);
+        let params: QueryParams = serde_json::from_value(serde_json::json!({
+            "searchFileName":"","searchFileType":0,"sortType":0,"sortOrder":0,
+            "searchAllSubfolders":"","searchFolder":"","startDate":0,"endDate":0,
+            "calendarSort":0,"make":"","model":"","lensMake":"","lensModel":"",
+            "locationCc":"XX","locationAdmin1":"","locationName":"Town","isFavorite":false,"rating":-1,
+            "tagId":0,"personId":0
+        })).unwrap();
+        let (joins, conditions, values) = AFile::build_search_query_parts(&params);
+        let mut stmt = db.prepare(&format!(
+            "SELECT a.id FROM afiles a JOIN afolders b ON b.id=a.folder_id {joins}{conditions} ORDER BY a.id"
+        )).unwrap();
+        let ids = stmt.query_map(params_from_iter(values.iter()), |row| row.get::<_, i64>(0))
+            .unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(ids, [7,8]);
+    }
 
     #[test]
     fn browser_file_types_preserve_smart_album_masks() {

@@ -1,4 +1,5 @@
 mod archive;
+mod audit_archive;
 #[cfg(windows)]
 mod afc;
 mod capture;
@@ -61,6 +62,8 @@ pub struct Report {
     total_received: u64,
     total_received_bytes: u64,
     local_pending: u64,
+    local_errors: u64,
+    local_error: Option<String>,
     local_filed: u64,
     local_duplicates: u64,
     checked_folders: u64,
@@ -1134,6 +1137,16 @@ pub fn tray(app: &AppHandle) -> tauri::Result<()> {
 pub fn command_line() -> Option<i32> {
     let args: Vec<_> = std::env::args_os().collect();
     match args.get(1)?.to_str()? {
+        "--verify-archive" => {
+            if args.len() != 3 { return Some(1); }
+            match audit_archive::verify(Path::new(&args[2])) {
+                Ok(result) => {
+                    println!("{}", serde_json::to_string(&result).expect("serialize archive totals"));
+                    Some(i32::from(result.failed != 0 || result.files_verified == 0))
+                }
+                Err(error) => { eprintln!("{error}"); Some(1) }
+            }
+        }
         #[cfg(windows)]
         mode @ ("--probe-iphone-originals" | "--check-iphone-originals") => {
             let root=args.get(2).map(PathBuf::from);
@@ -1143,7 +1156,11 @@ pub fn command_line() -> Option<i32> {
             // exactly like capture in the desktop, including for standalone diagnostics.
             let result=std::thread::spawn(move || -> Result<i32> {
                 let phone=afc::Phone::only()?;
-                if probe { println!("{{\"usb\":true,\"cameraDirectoryReadable\":true}}"); return Ok(0); }
+                if probe {
+                    let count = phone.camera_entry_count()?;
+                    println!("{}", serde_json::json!({"usb":true,"cameraDirectoryReadable":true,"cameraEntryCount":count}));
+                    return Ok(0);
+                }
                 let root=root.ok_or("请指定现有图库")?;
                 afc::verify_gallery(&root,&phone)?;
                 let result=afc::audit(&root,&phone,|status| {

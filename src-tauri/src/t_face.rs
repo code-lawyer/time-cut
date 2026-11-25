@@ -3,6 +3,7 @@
  * Face detection and clustering with local YuNet and SFace inference.
  */
 mod model;
+pub(crate) mod refresh;
 
 use crate::{t_cluster, t_common};
 use image::DynamicImage;
@@ -298,7 +299,8 @@ pub fn run_face_indexing(
     cancel_token: FaceIndexCancellation,
     status: FaceIndexingStatus,
     progress: FaceIndexProgressState,
-    cluster_epsilon: Option<f32>,
+    cluster_epsilon: f32,
+    automatic: bool,
 ) -> Result<(), String> {
     let library_id = crate::t_config::current_library_id()?;
     {
@@ -343,7 +345,7 @@ pub fn run_face_indexing(
             let ((_, processed, _, existing), files) = with_current_library(&library_id, || {
                 Ok((
                     Face::get_stats_full()?,
-                    Face::get_unprocessed_image_files()?,
+                    Face::get_unprocessed_image_files(automatic)?,
                 ))
             })?;
             faces_found = existing;
@@ -406,11 +408,12 @@ pub fn run_face_indexing(
                         if stored { faces.len() } else { 0 }
                     }
                     Some(Err(_)) => {
-                        // Retry on a future scan when the file or its thumbnail has recovered.
+                        with_current_library(&library_id, || Face::defer_detection(&target))?;
                         failures += 1;
                         0
                     }
                     None => {
+                        with_current_library(&library_id, || Face::defer_detection(&target))?;
                         pending_offline += 1;
                         0
                     }
@@ -424,7 +427,7 @@ pub fn run_face_indexing(
             publish(total, total, faces_found, "clustering");
             t_cluster::cluster_faces(
                 &library_id,
-                cluster_epsilon.unwrap_or(0.42),
+                cluster_epsilon,
                 |progress| {
                     let _ = app_handle.emit("cluster_progress", progress);
                 },

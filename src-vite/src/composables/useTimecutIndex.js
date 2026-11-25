@@ -69,7 +69,7 @@ export function useTimecutIndex(reportError) {
     const key = keyOf(payload.library_id, payload.album_id);
     const attempt = inFlight.get(key);
     if (!attempt) return;
-    if (payload.scan_complete !== true) {
+    if (payload.scan_complete !== true || payload.failed > 0) {
       inFlight.delete(key);
       const previous = retries.get(key);
       const delay = previous?.revision === attempt.revision ? Math.min(previous.delay * 2, 300_000) : 30_000;

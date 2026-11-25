@@ -289,14 +289,13 @@ impl ReverseGeocoder {
         if self.tree.size() == 0 {
             return None;
         }
-        if loc.0.is_nan() || loc.1.is_nan() {
+        if !loc.0.is_finite() || !loc.1.is_finite() {
             return None;
         }
         let query = lat_lon_to_xyz(loc.0, loc.1);
-        // rstar 0.12 has an internal unwrap that can panic on certain tree states;
-        // catch_unwind ensures the app survives even if the R-tree is corrupted.
+        // Location lookup is optional during indexing. Keep an index failure local to this photo.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.tree.nearest_neighbor(&query)
+            self.tree.nearest_neighbor(query)
         }));
         match result {
             Ok(Some(nearest)) => Some(SearchResult {
@@ -4590,6 +4589,7 @@ pub async fn index_album_worker(
     // 4. Traverse and index
     let mut is_cancelled = false;
     let mut traversal_failed = false;
+    let mut skipped_recovery_file = false;
     // WalkDir already visits every directory during indexing.  Record the
     // direct-parent relationship here so the sidebar never needs to rescan an
     // unchanged directory just to decide whether to show its expand arrow.
@@ -4669,11 +4669,12 @@ pub async fn index_album_worker(
                         path_str
                     );
                     let file_size = std::fs::metadata(&path_str).map(|m| m.len()).unwrap_or(0);
+                    skipped_recovery_file = true;
                     with_progress_tracker(&tracker, |tracker| {
                         tracker.modify(|snapshot| {
                             snapshot.discovered += 1;
-                            snapshot.failed += 1;
-                            snapshot.failed_size += file_size;
+                            snapshot.skipped += 1;
+                            snapshot.skipped_size += file_size;
                             snapshot.current_size += file_size;
                         });
                         tracker.maybe_emit();
@@ -4810,10 +4811,13 @@ pub async fn index_album_worker(
             eprintln!("Failed to remove stale folders from album {}: {}", album_id, error);
         }
 
-        println!("Cleaning up removed files from DB for album {}", album_id);
-        let deleted_count = AFile::delete_unseen_in_album(album_id, current_scan_time).unwrap_or(0);
-        if deleted_count > 0 {
-            println!("Deleted {} stale records from DB.", deleted_count);
+        // A file that failed before its scan timestamp was saved still exists.
+        // Preserve its library edits until a successful scan can distinguish removed files.
+        if final_snapshot.failed == 0 && !skipped_recovery_file {
+            let deleted_count = AFile::delete_unseen_in_album(album_id, current_scan_time).unwrap_or(0);
+            if deleted_count > 0 {
+                println!("Deleted {} stale records from DB.", deleted_count);
+            }
         }
 
         if let Err(error) = pair_live_photos_after_album_index(album_id) {

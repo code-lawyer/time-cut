@@ -6,7 +6,7 @@
 
 1. 在“手机插线导入”中开启“自动导入”。安卓解锁后将 USB 用途设为“文件传输”。图像传输模式可能只公开相机内容。
 2. iPhone 按系统提示解锁并“信任这台电脑”。Time-cut 可以从 Windows 照片接口接收，也可以通过 Apple 官方的「Apple 设备」读取已配对手机的相机原件。若希望保留 HEIC / HEVC 原始格式，在手机照片设置中将“传输到 Mac 或 PC”设为“保留原片”。如果 Windows 将已有 HEIF 原片列为相同设备标识、相同修改时间的 JPEG，界面会列出这批待核对项，程序先接收其他缺少的原件。仅在 iCloud 中保存的原件须先下载。
-3. 连接后，首次接收会优先写入第一份新原件。程序逐个目录把照片、视频和 AAE、XMP 附件列在本地清单里。盘点期间窗口显示已保存几个目录、列出多少项。一个目录发生读取错误后，重试会优先盘点其他目录并接收其中的新文件。取得整机清单后，窗口显示总数、已有备份凭据和待核对的数量。已确认版本复用本地原件。手机更换文件标识或同名文件难以区分时，程序读取内容核对。中断后保留清单和接收凭据，未传完的单个文件重新读取。
+3. 连接后，首次接收会优先写入第一份新原件。程序逐个目录把照片、视频和 AAE、XMP 附件列在本地清单里。盘点期间窗口显示已保存几个目录、列出多少项。一个目录发生读取错误后，重试会优先盘点其他目录并接收其中的新文件。取得整机清单后，窗口显示总数、已有备份凭据和待核对的数量。Apple 原件通道提供源端摘要时，可校验后复用电脑上的副本。Windows WPD 通道缺少源端摘要时，复扫会重新读取手机文件核对内容；大图库需要保持连接更久。中断后保留清单和接收凭据，未传完的单个文件重新读取。
 4. 看到 **原件已收齐，可以拔线** 就可以断开手机。此时清单上的每一项都有已校验的本地文件，程序也已重新核对手机的目录成员和文件版本，历史待补记录已清零。空目录、缺少已见项目的清单或复制期间发生的变化都会保留为待核对。窗口显示收齐时间和本轮实际经过时间。此后电脑按拍摄年月归档、合并重复内容、配对实况照片和编辑附件，并更新本机相册索引。关闭主窗口可在托盘继续。请在本地整理结束前保留图库中的 `.time-cut` 目录。
 
 Windows 仍显示手机但读不到照片时，应用会保留上次的目录清单和每份原件的接收记录。通过 USB 导出的照片和视频有时会改变编码。应用会单列有对应 HEIF 原片的 JPEG，以及标识、文件名、修改时间相同但大小改变的 MOV。如果这批待核对文件的预计总量超过图库可用空间，界面会显示两个数值。接收器暂缓写入这批文件，继续补其他原件。后续盘点会重新检查手机提供的格式和磁盘空间。
@@ -54,10 +54,13 @@ Time-cut 的 Windows 测试版基于 Lap v0.4.1，固定提交 `f92b0b032c9ea317
 
 ### 从本地源码构建
 
-在 Visual Studio 2022 的 x64 Developer PowerShell 中使用 Rust MSVC、CMake 3.31、Node.js 和 pnpm 9。先从 Microsoft.ML.OnnxRuntime 1.22.0 的 NuGet 包取出 `runtimes/win-x64/native` 下的库及 DLL，放在同一目录，并放入包内的 `LICENSE` 和 `ThirdPartyNotices.txt`。将环境变量 `ORT_LIB_LOCATION` 指向该目录。从本项目根目录执行以下命令。
+在 Visual Studio 2022 的 x64 Developer PowerShell 中使用 Rust MSVC、CMake 3.31、Node.js 和 pnpm 9。准备脚本按 NuGet 的 SHA-512 核对 Microsoft.ML.OnnxRuntime 1.22.0，并取出 x64 库及许可。已有该版本的 NuGet 包时，可传入 `-Package <nupkg 路径>` 离线使用。从本项目根目录执行以下命令。
 
 ```powershell
 git submodule update --init --recursive
+$env:ORT_LIB_LOCATION = Join-Path $PWD '.timecut-build/onnxruntime-win-x64-1.22.0'
+.\scripts\prepare_windows_ort.ps1 -Destination $env:ORT_LIB_LOCATION
+$env:Path = "$env:ORT_LIB_LOCATION;$env:Path"
 .\scripts\download_models.ps1
 .\scripts\download_ffmpeg_sidecar.ps1 -Arch x64
 pnpm --dir src-vite install --frozen-lockfile
@@ -68,13 +71,17 @@ cargo build --locked --release --manifest-path src-tauri/Cargo.toml
 .\scripts\package_timecut_windows.ps1
 ```
 
-生成的便携目录和 ZIP 位于项目的 `release-test`。导入核心测试可用 `cargo test --release --manifest-path src-tauri/Cargo.toml ingest::` 运行。
+生成的便携目录、ZIP 和同名 `.sha256` 校验文件位于项目的 `release-test`。可用 `-OutputDirectory <目录>` 指定其他输出位置。同版本重打包会复用完全相同的展开目录；若内容不同，先保留上份目录，再发布干净的新目录。每个新包从干净目录组装，并在包内 `BUILD-INFO.json` 记录打包时的 Git 提交、工作树是否有修改、子模块提交和程序的 SHA-256。
+
+GitHub 的 **Time-cut Windows x64** 工作流在拉取请求和手动运行时生成可下载的候选产物。推送与源码版本一致的 `timecut-v<版本>` 标签会从该提交构建 ZIP、校验解压后的程序并运行桌面及恢复测试，通过后将 ZIP 和 SHA-256 附到该仓库的同标签 Release。此工作流发布 x64 便携版。
+
+导入核心测试可用 `cargo test --release --manifest-path src-tauri/Cargo.toml ingest::` 运行。
 
 使用 Node.js 24 可复跑桌面和中断恢复测试。先从托盘退出日常使用的 Time-cut。在源码根目录执行 `node scripts/test_timecut_desktop.mjs <已解压的程序路径>` 和 `node scripts/test_timecut_recovery.mjs <已解压的程序路径>`。两个脚本都在项目的 `.timecut-build` 内建立独立测试目录。桌面脚本可追加一组苹果实况照片的图片和 MOV 路径来检查配对。[本次使用的公开实况样本](https://github.com/pulsejet/memories/tree/504243ba5eb07cf29770e5802ca91874e960e681/tests/assets)
 
 在已连接并授权的单台 iPhone 上，可运行 `node scripts/test_timecut_iphone.mjs <已解压的程序路径>`。它在 `.timecut-build` 中建立独立图库，全量复制 USB 可访问的媒体，然后在同一次连接上复扫并验证去重。它会保留归档和图库索引，结果文件只记录耗时及数量。
 
-中断后可在程序路径后追加原测试目录，沿用已有归档继续验收。再加 `--verify-local` 时只核对本机归档、索引和整理结果。
+中断后可在程序路径后追加原测试目录，沿用已有归档继续验收。再加 `--verify-local` 时，脚本逐份读回归档原件核对 BLAKE3，检查媒体是否已录入指定相册，并统计分类和人脸处理记录。结果写入测试目录的 `local-verification.json`，沿用原来的自动接收设置。只检查归档原件可以运行 `Time-cut.exe --verify-archive "图库绝对路径"`。原件为空、缺失或内容不符时，命令会返回非零退出码。
 
 ### 独立核对 iPhone 相机原件
 

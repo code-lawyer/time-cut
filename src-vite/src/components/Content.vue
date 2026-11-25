@@ -848,7 +848,7 @@ import { isWin, isMac, isLinux, separator,
          getCachedThumbnailDataUrl,
          clearCachedThumbnailDataUrl,
          extractFileName, combineFileName, getFolderPath, getFolderName, getSelectOptions, 
-         getMediaItemSize, shortenFilename, getSlideShowInterval, copyFilePaths, getClipboardItemPaths, getFullPath, normalizePathForCompare, isWithinRootPath, shouldUseBackendPreview, isPreviewOnlyDocument } from '@/common/utils';
+         getMediaItemSize, shortenFilename, getSlideShowInterval, copyFilePaths, getClipboardItemPaths, getFullPath, normalizePathForCompare, isWithinRootPath, shouldUseBackendPreview, isPreviewOnlyDocument, getCountryName } from '@/common/utils';
 
 import DropDownSelect from '@/components/DropDownSelect.vue';
 import ProgressBar from '@/components/ProgressBar.vue';
@@ -2548,7 +2548,7 @@ function handleNavigateMetadata(payload: { type: string; [key: string]: any }) {
     case 'location': {
       const title = [payload.name, payload.admin1, payload.cc].filter(Boolean).join(', ');
       enterMetadataTempView('location', title, {
-        locationCc: payload.cc ?? null, locationAdmin1: payload.admin1 || '', locationName: payload.name || '', searchFileType: 0,
+        locationCc: payload.cc ?? '', locationAdmin1: payload.admin1 || '', locationName: payload.name || '', searchFileType: 0,
       });
       break;
     }
@@ -8815,11 +8815,13 @@ async function updateContent(force = false, preserveMultiSelection = selectMode.
       contentTitle.value = "";
       showEmptyContent(requestId);
     } else {
+      const region = libConfig.location.admin1 || (libConfig.location.cc && getCountryName(libConfig.location.cc, locale.value))
+        || t('search.unknown_location');
       if(libConfig.location.name) {
-        contentTitle.value = `${libConfig.location.admin1} > ${libConfig.location.name}`;
+        contentTitle.value = `${region} > ${libConfig.location.name}`;
         getFileList({ locationCc: libConfig.location.cc, locationAdmin1: libConfig.location.admin1, locationName: libConfig.location.name }, requestId);
       } else {
-        contentTitle.value = `${libConfig.location.admin1}`;
+        contentTitle.value = region;
         getFileList({ locationCc: libConfig.location.cc, locationAdmin1: libConfig.location.admin1 }, requestId);
       } 
     }

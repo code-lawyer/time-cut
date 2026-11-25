@@ -24,11 +24,12 @@ use super::schema::{self, CatalogField};
 use super::merge::apply_with_state;
 #[cfg(test)]
 use super::merge::apply_xmp_metadata_to_db;
-use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
+use quick_xml::{escape::unescape, events::Event, reader::NsReader};
 use rusqlite::{Connection, OptionalExtension};
 #[cfg(test)]
 use rusqlite::params;
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -909,17 +910,23 @@ fn collect_properties<'a>(node: &'a XmlNode, out: &mut Vec<&'a XmlNode>) {
 }
 fn resolved_name(result: quick_xml::name::ResolveResult<'_>) -> Result<String, String> {
     match result {
-        quick_xml::name::ResolveResult::Bound(ns) => {
-            String::from_utf8(ns.as_ref().to_vec()).map_err(|e| e.to_string())
-        }
+        quick_xml::name::ResolveResult::Bound(ns) => Ok(ns.as_ref().to_owned()),
         quick_xml::name::ResolveResult::Unbound => Ok(String::new()),
         quick_xml::name::ResolveResult::Unknown(prefix) => {
             Err(format!("Unbound XML prefix: {:?}", prefix))
         }
     }
 }
+fn reference_text(reference: &quick_xml::events::BytesRef<'_>) -> Result<Cow<'static, str>, String> {
+    if let Some(ch) = reference.resolve_char_ref().map_err(|e| e.to_string())? {
+        return Ok(Cow::Owned(ch.to_string()));
+    }
+    quick_xml::escape::resolve_xml_entity(reference.as_ref())
+        .map(Cow::Borrowed)
+        .ok_or_else(|| format!("Unknown XML entity: {}", reference.as_ref()))
+}
+
 pub(crate) fn parse_xml(content: &str) -> Result<XmlNode, String> {
-    use quick_xml::{events::Event, reader::NsReader};
     if content.len() > MAX_XMP_BYTES {
         return Err("XMP exceeds 16 MiB size limit".into());
     }
@@ -938,10 +945,10 @@ pub(crate) fn parse_xml(content: &str) -> Result<XmlNode, String> {
                 if nodes > MAX_XML_NODES {
                     return Err("XMP node limit exceeded".into());
                 }
-                let (ns, local) = reader.resolve_element(e.name());
+                let (ns, local) = reader.resolver().resolve_element(e.name());
                 let mut node = XmlNode {
                     uri: resolved_name(ns)?,
-                    name: String::from_utf8_lossy(local.as_ref()).into_owned(),
+                    name: local.as_ref().to_owned(),
                     ..Default::default()
                 };
                 expanded += node.uri.len() + node.name.len();
@@ -954,14 +961,13 @@ pub(crate) fn parse_xml(content: &str) -> Result<XmlNode, String> {
                     if nodes > MAX_XML_NODES {
                         return Err("XMP node limit exceeded".into());
                     }
-                    if attr.key.as_ref() == b"xmlns" || attr.key.as_ref().starts_with(b"xmlns:") {
+                    if attr.key.as_ref() == "xmlns" || attr.key.as_ref().starts_with("xmlns:") {
                         continue;
                     }
-                    let (ns, local) = reader.resolve_attribute(attr.key);
+                    let (ns, local) = reader.resolver().resolve_attribute(attr.key);
                     let uri = resolved_name(ns)?;
-                    let name = String::from_utf8_lossy(local.as_ref()).into_owned();
-                    let text = attr
-                        .decode_and_unescape_value(reader.decoder())
+                    let name = local.as_ref().to_owned();
+                    let text = unescape(&attr.value)
                         .map_err(|e| e.to_string())?
                         .into_owned();
                     expanded += uri.len() + name.len() + text.len();
@@ -991,19 +997,14 @@ pub(crate) fn parse_xml(content: &str) -> Result<XmlNode, String> {
                 let node = stack.pop().unwrap();
                 stack.last_mut().unwrap().children.push(node);
             }
-            Event::Text(e) => {
-                let text = e.unescape().map_err(|e| e.to_string())?;
+            Event::Text(_) | Event::CData(_) | Event::GeneralRef(_) => {
+                let text = match &event {
+                    Event::GeneralRef(reference) => reference_text(reference)?,
+                    _ => Cow::Borrowed(&*event),
+                };
                 if stack.len() == 1 && !text.trim().is_empty() {
                     return Err("Text outside XML root".into());
                 }
-                expanded += text.len();
-                if expanded > MAX_XML_EXPANDED_BYTES {
-                    return Err("XMP expanded text limit exceeded".into());
-                }
-                stack.last_mut().unwrap().text.push_str(&text);
-            }
-            Event::CData(e) => {
-                let text = e.decode().map_err(|e| e.to_string())?;
                 expanded += text.len();
                 if expanded > MAX_XML_EXPANDED_BYTES {
                     return Err("XMP expanded text limit exceeded".into());
@@ -1059,13 +1060,6 @@ fn remove_legacy_auto_writeback(conn: &Connection) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-fn namespace(result: ResolveResult<'_>) -> Result<String, String> {
-    match result {
-        ResolveResult::Bound(n) => Ok(String::from_utf8_lossy(n.as_ref()).into()),
-        ResolveResult::Unbound => Ok(String::new()),
-        ResolveResult::Unknown(_) => Err("Unbound XML namespace".into()),
-    }
-}
 #[derive(Default)]
 struct Node {
     uri: String,
@@ -1083,12 +1077,11 @@ fn escape(s: &str) -> String {
 }
 
 /// Patch owned properties while preserving unrelated elements and language variants.
-fn culling_property(uri: &str, name: &[u8], value: &str) -> bool {
-    let name = String::from_utf8_lossy(name);
-    (schema::PICK.matches(uri, &name) || schema::GOOD.matches(uri, &name))
-        || (schema::REJECTED.matches(uri, &name))
-        || schema::DIGIKAM_PICK.matches(uri, &name)
-        || (schema::LABEL.matches(uri, &name)
+fn culling_property(uri: &str, name: &str, value: &str) -> bool {
+    (schema::PICK.matches(uri, name) || schema::GOOD.matches(uri, name))
+        || (schema::REJECTED.matches(uri, name))
+        || schema::DIGIKAM_PICK.matches(uri, name)
+        || (schema::LABEL.matches(uri, name)
             && matches!(
                 value.trim().to_ascii_lowercase().as_str(),
                 "pick" | "select" | "reject" | "rejected"
@@ -1105,8 +1098,9 @@ fn property_text(xml: &str, node: &Node) -> Result<String, String> {
     let mut text = String::new();
     loop {
         match reader.read_event().map_err(|e| e.to_string())? {
-            Event::Text(e) => text.push_str(&e.unescape().map_err(|e| e.to_string())?),
-            Event::CData(e) => text.push_str(&e.decode().map_err(|e| e.to_string())?),
+            Event::Text(e) => text.push_str(e.as_ref()),
+            Event::CData(e) => text.push_str(e.as_ref()),
+            Event::GeneralRef(reference) => text.push_str(&reference_text(&reference)?),
             Event::Eof => break,
             _ => {}
         }
@@ -1161,10 +1155,10 @@ fn merge_with_paths(
         let end = reader.buffer_position() as usize;
         match event {
             Event::Start(ref e) | Event::Empty(ref e) => {
-                let (ns, local) = reader.resolve_element(e.name());
+                let (ns, local) = reader.resolver().resolve_element(e.name());
                 let mut node = Node {
-                    uri: namespace(ns)?,
-                    name: String::from_utf8_lossy(local.as_ref()).into(),
+                    uri: resolved_name(ns)?,
+                    name: local.as_ref().to_owned(),
                     start,
                     open_end: end,
                     close: start,
@@ -1178,19 +1172,19 @@ fn merge_with_paths(
                 let mut retained_property = false;
                 for a in e.attributes() {
                     let a = a.map_err(|e| e.to_string())?;
-                    let (ns, local) = reader.resolve_attribute(a.key);
-                    let uri = namespace(ns)?;
-                    let name = String::from_utf8_lossy(local.as_ref());
+                    let (ns, local) = reader.resolver().resolve_attribute(a.key);
+                    let uri = resolved_name(ns)?;
+                    let name = local.as_ref();
                     if uri == NS_RDF && name == "about" {
                         node.about = Some(
-                            a.decode_and_unescape_value(reader.decoder())
+                            unescape(&a.value)
                                 .map_err(|e| e.to_string())?
                                 .into_owned(),
                         );
                     }
                     if uri == "http://www.w3.org/XML/1998/namespace" && name == "lang" {
                         node.lang = Some(
-                            a.decode_and_unescape_value(reader.decoder())
+                            unescape(&a.value)
                                 .map_err(|e| e.to_string())?
                                 .into_owned(),
                         );
@@ -1204,39 +1198,40 @@ fn merge_with_paths(
                         .is_some_and(|i| nodes[i].uri == NS_RDF && nodes[i].name == "RDF")
                     && node.about.as_deref().unwrap_or("").is_empty()
                 {
-                    filtered.clear_attributes();
                     for a in e.attributes() {
-                        let a = a.map_err(|e| e.to_string())?;
-                        let (ns, local) = reader.resolve_attribute(a.key);
-                        let uri = namespace(ns)?;
-                        let own = (schema::FAVORITE.matches(&uri, &String::from_utf8_lossy(local.as_ref()))
+                        let mut a = a.map_err(|e| e.to_string())?;
+                        let (ns, local) = reader.resolver().resolve_attribute(a.key);
+                        let uri = resolved_name(ns)?;
+                        let own = (schema::FAVORITE.matches(&uri, local.as_ref())
                             && mask & CatalogField::Favorite.mask() != 0)
-                            || (schema::RATING.matches(&uri, &String::from_utf8_lossy(local.as_ref())) && mask & CatalogField::Rating.mask() != 0)
+                            || (schema::RATING.matches(&uri, local.as_ref()) && mask & CatalogField::Rating.mask() != 0)
                             || (keywords::writable_property(&uri, local.as_ref()) && mask & CatalogField::Tags.mask() != 0)
-                            || (schema::DESCRIPTION[0].matches(&uri, &String::from_utf8_lossy(local.as_ref())) && mask & CatalogField::Description.mask() != 0)
+                            || (schema::DESCRIPTION[0].matches(&uri, local.as_ref()) && mask & CatalogField::Description.mask() != 0)
                             || (mask & CatalogField::Culling.mask() != 0
                                 && culling_property(
                                     &uri,
                                     local.as_ref(),
-                                    &a.decode_and_unescape_value(reader.decoder())
+                                    &unescape(&a.value)
                                         .map_err(|e| e.to_string())?,
                                 ));
                         let own = own || text.iter().any(|(property, _)|
-                            property.matches(&uri, &String::from_utf8_lossy(local.as_ref())));
+                            property.matches(&uri, local.as_ref()));
                         if own {
-                            tag_writer.observe(&uri, &String::from_utf8_lossy(local.as_ref()));
+                            tag_writer.observe(&uri, local.as_ref());
                             had_darktable_rejected |=
-                                schema::REJECTED.matches(&uri, &String::from_utf8_lossy(local.as_ref()));
-                            if schema::DIGIKAM_PICK.matches(&uri, &String::from_utf8_lossy(local.as_ref())) {
-                                digikam_pick = Some(a.decode_and_unescape_value(reader.decoder()).map_err(|e| e.to_string())?.trim() == "2");
+                                schema::REJECTED.matches(&uri, local.as_ref());
+                            if schema::DIGIKAM_PICK.matches(&uri, local.as_ref()) {
+                                digikam_pick = Some(unescape(&a.value).map_err(|e| e.to_string())?.trim() == "2");
                             }
                             changed = true;
                         } else {
-                            // Attribute already contains validated, escaped source bytes.
-                            // Preserve those bytes, including namespace declarations.
-                            retained_property |= !(a.key.as_ref() == b"xmlns"
-                                || a.key.as_ref().starts_with(b"xmlns:")
-                                || (uri == NS_RDF && local.as_ref() == b"about"));
+                            // push_attribute writes double quotes even for single-quoted input.
+                            retained_property |= !(a.key.as_ref() == "xmlns"
+                                || a.key.as_ref().starts_with("xmlns:")
+                                || (uri == NS_RDF && local.as_ref() == "about"));
+                            if a.value.contains('"') {
+                                a.value = Cow::Owned(a.value.replace('"', "&quot;"));
+                            }
                             filtered.push_attribute(a);
                         }
                     }
@@ -1271,14 +1266,14 @@ fn merge_with_paths(
                 nodes[index].close = start;
                 nodes[index].end = end;
             }
-            Event::PI(ref e) if e.target() == b"xpacket" => {
-                let content = std::str::from_utf8(e.content()).map_err(|e| e.to_string())?;
+            Event::PI(ref e) if e.target() == "xpacket" => {
+                let content = e.content();
                 let pseudo = format!("<packet {content}/>");
                 let mut pi_reader = quick_xml::Reader::from_str(&pseudo);
                 if let Event::Empty(packet) = pi_reader.read_event().map_err(|e| e.to_string())? {
                     for attr in packet.attributes() {
                         let attr = attr.map_err(|e| e.to_string())?;
-                        if attr.key.as_ref() == b"end" && attr.value.as_ref() == b"r" {
+                        if attr.key.as_ref() == "end" && attr.value.as_ref() == "r" {
                             return Err("XMP packet is marked read-only".into());
                         }
                     }
@@ -1320,9 +1315,9 @@ fn merge_with_paths(
         }
         if (mask & CatalogField::Favorite.mask() != 0 && schema::FAVORITE.matches(&n.uri, &n.name))
             || (mask & CatalogField::Rating.mask() != 0 && schema::RATING.matches(&n.uri, &n.name))
-            || (mask & CatalogField::Tags.mask() != 0 && keywords::writable_property(&n.uri, n.name.as_bytes()))
+            || (mask & CatalogField::Tags.mask() != 0 && keywords::writable_property(&n.uri, &n.name))
             || (mask & CatalogField::Culling.mask() != 0
-                && culling_property(&n.uri, n.name.as_bytes(), &property_text(xml, n)?))
+                && culling_property(&n.uri, &n.name, &property_text(xml, n)?))
         {
             had_darktable_rejected |= schema::REJECTED.matches(&n.uri, &n.name);
             if schema::DIGIKAM_PICK.matches(&n.uri, &n.name) {
@@ -2203,6 +2198,26 @@ mod import_tests {
         ))
         .unwrap();
         assert_eq!(meta.rating, Some(5));
+    }
+    #[test]
+    fn mixed_references_and_foreign_attributes_survive_rating_writeback() {
+        let input = format!(
+            r#"<rdf:RDF xmlns:rdf="{NS_RDF}"><rdf:Description xmlns:r="{NS_XMP}" xmlns:d="{NS_DC}" xmlns:custom="urn:photo" r:Rating="1" custom:note='She said "yes" &amp;amp; &#65;'><d:description>&amp;amp;<![CDATA[ &lt; ]]>caf&#xE9;</d:description><r:Label>P&#105;ck</r:Label></rdf:Description></rdf:RDF>"#
+        );
+        let first = parse_xmp_str(&input).unwrap();
+        assert_eq!(first.culling_flag, Some(1));
+        assert_eq!(first.description.as_deref(), Some("&amp; &lt; café"));
+        let updated = merge_with_culling(&input, 5, 0, &[], "", CatalogField::Rating.mask()).unwrap();
+        let metadata = parse_xmp_str(&updated).unwrap();
+        assert_eq!(metadata.rating, Some(5));
+        assert_eq!(metadata.culling_flag, Some(0));
+        assert_eq!(metadata.description, first.description);
+        assert!(!updated.contains("P&#105;ck"));
+        let document = parse_xml(&updated).unwrap();
+        let mut properties = Vec::new();
+        collect_properties(&document, &mut properties);
+        let note = properties.iter().find(|n| n.uri == "urn:photo" && n.name == "note").unwrap();
+        assert_eq!(note.text, r#"She said "yes" &amp; A"#);
     }
     #[test]
     fn namespaces_are_scoped_and_language_is_exact() {

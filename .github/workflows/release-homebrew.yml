@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   update-homebrew:
+    if: github.repository == 'julyx10/lap'
     runs-on: macos-latest
     steps:
       - name: Checkout homebrew-lap

@@ -242,6 +242,10 @@ impl Phone {
         ).map_err(|error| context("列出 Apple 目录",&path.to_string_lossy(),error))?)
     }
 
+    pub(super) fn camera_entry_count(&self) -> Result<usize> {
+        Ok(self.list(Path::new(CAMERA))?.len())
+    }
+
     fn walk(
         &self,
         order: Option<&CopyOrder>,

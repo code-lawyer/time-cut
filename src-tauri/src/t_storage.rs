@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use zip::ZipWriter;
 use zip::read::ZipArchive;
-use zip::write::FileOptions;
+use zip::write::SimpleFileOptions;
 
 use crate::t_config::{self, AppConfig, Library, LibraryState};
 
@@ -390,8 +390,7 @@ pub fn backup_databases(library_ids: &[String], dest_path: &str) -> Result<Backu
     let info_json = serde_json::to_string_pretty(&backup_info)
         .map_err(|e| format!("Failed to serialize backup info: {}", e))?;
 
-    let options =
-        FileOptions::<'_, ()>::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     zip.start_file("backup-info.json", options)
         .map_err(|e| format!("Failed to write backup-info.json to zip: {}", e))?;
     zip.write_all(info_json.as_bytes())
@@ -405,8 +404,6 @@ pub fn backup_databases(library_ids: &[String], dest_path: &str) -> Result<Backu
             .read_to_string(&mut config_content)
             .map_err(|e| format!("Failed to read config file: {}", e))?;
 
-        let options =
-            FileOptions::<'_, ()>::default().compression_method(zip::CompressionMethod::Deflated);
         zip.start_file("app-config.json", options)
             .map_err(|e| format!("Failed to write app-config.json to zip: {}", e))?;
         zip.write_all(config_content.as_bytes())
@@ -421,20 +418,16 @@ pub fn backup_databases(library_ids: &[String], dest_path: &str) -> Result<Backu
             continue;
         }
 
-        let mut db_content = Vec::new();
-        fs::File::open(path)
-            .map_err(|e| format!("Failed to read database '{}': {}", lib.name, e))?
-            .read_to_end(&mut db_content)
+        let mut database = fs::File::open(path)
             .map_err(|e| format!("Failed to read database '{}': {}", lib.name, e))?;
 
         let safe_name = sanitize_filename(&lib.name);
         let zip_path = format!("{}.db", safe_name);
 
-        let options =
-            FileOptions::<'_, ()>::default().compression_method(zip::CompressionMethod::Deflated);
-        zip.start_file(&zip_path, options)
+        let size = database.metadata().map_err(|e| format!("Failed to read size of '{}': {}", lib.name, e))?.len();
+        zip.start_file(&zip_path, options.large_file(size >= u32::MAX as u64))
             .map_err(|e| format!("Failed to write {} to zip: {}", zip_path, e))?;
-        zip.write_all(&db_content)
+        std::io::copy(&mut database, &mut zip)
             .map_err(|e| format!("Failed to write {} content: {}", zip_path, e))?;
 
         library_names.push(lib.name.clone());
@@ -493,16 +486,16 @@ pub fn restore_databases(
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("Failed to read zip entry: {}", e))?;
-        let entry_name = entry.name().to_string();
-        if !entry_name.ends_with(".db") {
+        let entry_name = entry.name()
+            .map_err(|e| format!("Failed to read name of backup entry {}: {}", i, e))?.into_owned();
+        let Some(lib_name) = entry_name.strip_suffix(".db") else {
             continue;
-        }
-        let lib_name = entry_name.trim_end_matches(".db").to_string();
+        };
         let mut content = Vec::new();
         entry
             .read_to_end(&mut content)
             .map_err(|e| format!("Failed to read zip entry '{}': {}", entry_name, e))?;
-        db_entries.insert(lib_name, content);
+        db_entries.insert(lib_name.to_owned(), content);
     }
 
     let mut restored_names = Vec::new();
@@ -603,6 +596,51 @@ mod migration_tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn backup_and_restore_database_with_unicode_name_and_db_suffix() {
+        // The migration guard and library configuration are process-wide.
+        const CHILD: &str = "TIMECUT_TEST_BACKUP_PROCESS";
+        if std::env::var_os(CHILD).is_none() {
+            let profile = TestDir::new();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", std::thread::current().name().unwrap()])
+                .env("TIMECUT_DATA_DIR", &profile.0)
+                .env(CHILD, "1")
+                .output().unwrap();
+            assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr));
+            return;
+        }
+
+        let name = "旅行.db";
+        t_config::update_app_config(|config| {
+            config.libraries[0].name = name.into();
+            Ok(())
+        }).unwrap();
+        let path = get_library_db_path("default").unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE sample(value); INSERT INTO sample VALUES (37);").unwrap();
+        drop(conn);
+
+        let archive = t_config::get_app_data_dir().unwrap().join("backup.zip");
+        let archive = archive.to_str().unwrap();
+        let backup = backup_databases(&["default".into()], archive).unwrap();
+        assert_eq!(backup.library_names, [name]);
+        let meta = parse_backup_file(archive).unwrap();
+        assert_eq!(meta.libraries.len(), 1);
+        assert_eq!(meta.libraries[0].name, name);
+        assert_eq!(meta.libraries[0].db_size as u64, fs::metadata(path).unwrap().len());
+
+        let restored = restore_databases(archive, &[RestoreSelection {
+            library_name: name.into(), should_rename: true,
+        }]).unwrap();
+        assert_eq!(restored.restored_names, ["旅行.db (1)"]);
+        let config = t_config::load_app_config().unwrap();
+        let lib = config.libraries.iter().find(|lib| lib.name == restored.restored_names[0]).unwrap();
+        let conn = rusqlite::Connection::open(get_library_db_path(&lib.id).unwrap()).unwrap();
+        assert_eq!(conn.query_row("SELECT value FROM sample", [], |row| row.get::<_, i32>(0)).unwrap(), 37);
     }
 
     #[test]

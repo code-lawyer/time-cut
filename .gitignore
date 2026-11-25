@@ -1,5 +1,6 @@
 .worktrees/
 .timecut-build/
+__pycache__/
 release-test/
 .vscode/
 .workbuddy/

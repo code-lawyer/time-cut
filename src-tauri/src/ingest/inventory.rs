@@ -447,6 +447,26 @@ pub(super) fn publish(
     Ok(())
 }
 
+/// Folder checkpoints serve interrupted scans. Once a run is released, the
+/// complete list and its content manifest are the permanent item-level evidence.
+/// Remove only checkpoint rows also present in a verified final list. Retain
+/// earlier differing observations, folder summaries, and every open run.
+pub(super) fn compact_folder_checkpoints(db: &Connection, source: &str) -> Result<()> {
+    db.execute("WITH unambiguous AS (
+        SELECT run_id,entry,version,size,modified,MIN(parent) AS parent,MIN(ordinal) AS ordinal
+        FROM phone_folder_items WHERE run_id IN
+            (SELECT id FROM phone_runs WHERE source=? AND safe_at IS NOT NULL)
+        GROUP BY run_id,entry,version,size,modified HAVING COUNT(*)=1)
+        DELETE FROM phone_folder_items WHERE (run_id,parent,ordinal) IN (
+            SELECT f.run_id,f.parent,f.ordinal FROM unambiguous f WHERE 1=(
+                SELECT COUNT(*) FROM phone_list_items m INDEXED BY phone_list_signature CROSS JOIN phone_manifest p
+                ON p.run_id=m.run_id AND p.ordinal=m.ordinal AND p.digest=m.digest
+                    AND p.entry=m.entry AND p.version IS m.version AND (m.size IS NULL OR p.size=m.size)
+                WHERE m.run_id=f.run_id AND m.entry=f.entry AND m.size IS f.size
+                    AND m.modified IS f.modified AND m.version IS f.version))", [source])?;
+    Ok(())
+}
+
 pub(super) fn checkpoint(
     db: &Connection,
     run: i64,

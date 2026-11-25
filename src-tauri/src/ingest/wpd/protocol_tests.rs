@@ -774,7 +774,10 @@ fn resuming_an_unlistable_folder_keeps_new_originals_seen_before_the_bad_object(
     let complete = run(4, rows(false));
     assert!(complete.safe_at.is_some(), "{:?}", complete.issues);
     assert_eq!((complete.added, complete.skipped), (1, 1));
-    assert_eq!(opened.lock().unwrap().len(), 2);
+    let requests = opened.lock().unwrap();
+    assert_eq!(requests.iter().filter(|p| p.as_str() == wanted).count(), 2,
+        "the restored receipt also needs a byte comparison on the complete pass");
+    assert_eq!(requests.len(), 3);
 }
 
 #[test]
@@ -840,7 +843,9 @@ fn a_failing_directory_rotates_behind_healthy_folders_and_preserves_their_invent
     let last=attempt(3,false);
     assert!(last.safe_at.is_some(),"{:?}",last.issues);
     assert_eq!((last.list_total,last.list_covered,last.added),(Some(2),2,1));
-    assert_eq!(&*opened.lock().unwrap(),&[good,recovered]);
+    let requests = opened.lock().unwrap();
+    assert_eq!(requests.iter().filter(|p| p.as_str() == good).count(), 2);
+    assert_eq!(requests.iter().filter(|p| p.as_str() == recovered).count(), 1);
 }
 
 #[test]

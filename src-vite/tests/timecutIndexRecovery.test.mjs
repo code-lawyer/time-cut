@@ -12,8 +12,10 @@ async function mount(index) {
   const job = { library: 'default', album: 1, revision: 7 };
   let requests = [job];
   let mounted, poll;
+  let now = 100_000;
   const events = new Map(), acknowledged = [];
-  const context = vm.createContext({ setInterval: (fn) => { poll = fn; }, clearInterval: () => {} });
+  const context = vm.createContext({ setInterval: (fn) => { poll = fn; }, clearInterval: () => {},
+    Date: { now: () => now } });
   const dependencies = {
     vue: { onMounted: (fn) => { mounted = fn; }, onUnmounted: () => {}, watch: () => {} },
     '@tauri-apps/api/core': { invoke: async (name, args) => {
@@ -37,8 +39,9 @@ async function mount(index) {
   await module.evaluate();
   module.namespace.useTimecutIndex(error => { if (error) throw error; });
   await mounted();
-  return { index, job, acknowledged, poll, async finish(complete = true) {
-    events.get('index_finished')({payload: {library_id: 'default', album_id: 1, scan_complete: complete}});
+  return { index, job, acknowledged, poll, advance: milliseconds => { now += milliseconds; },
+    async finish(complete = true, failed = 0) {
+    events.get('index_finished')({payload: {library_id: 'default', album_id: 1, scan_complete: complete, failed}});
     await new Promise(resolve => setImmediate(resolve));
   } };
 }
@@ -57,6 +60,21 @@ test('resumes a restored phone index and acknowledges only the revision that sta
   run.index.albumQueue.shift();
   await run.finish();
   assert.deepEqual(run.acknowledged, [7, 8]);
+});
+
+test('keeps an import revision pending when traversal finishes with a failed file', async () => {
+  const run = await mount({ status: 0, albumQueue: [], pausedAlbumIds: [] });
+  run.index.albumQueue.shift();
+  run.index.status = 0;
+  await run.finish(true, 1);
+  await run.poll();
+  assert.deepEqual(run.acknowledged, []);
+  assert.deepEqual(run.index.albumQueue, []); // Back off before retrying the same revision.
+  run.advance(30_000);
+  await run.poll();
+  assert.deepEqual(run.index.albumQueue, [1]);
+  await run.finish();
+  assert.deepEqual(run.acknowledged, [7]);
 });
 
 test('leaves an explicit pause and an unrelated paused queue head alone', async () => {

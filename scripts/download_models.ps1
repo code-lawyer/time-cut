@@ -1,4 +1,4 @@
-param([switch]$ClipOnly)
+param([switch]$ClipOnly, [switch]$VerifyOnly)
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -36,6 +36,7 @@ foreach ($model in $Models) {
         Test-ModelIntegrity -Path $FilePath -ExpectedSha256 $model.Sha256
         Write-Host "# $($model.File) verified, skipping download."
     } else {
+        if ($VerifyOnly) { throw "Missing model input: $FilePath" }
         Write-Host "Downloading $($model.File)..."
         $Headers = @{}
         if ($env:HF_TOKEN -and ([Uri]$model.Url).Host -eq 'huggingface.co') {

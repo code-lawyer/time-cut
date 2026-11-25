@@ -2,10 +2,11 @@
   <section class="report" aria-labelledby="timecut-report-title">
     <div class="report-heading">
       <h2 id="timecut-report-title">{{ t(busy ? 'timecut.progress' : 'timecut.last') }}</h2>
-      <span role="status" class="phase"><span v-if="busy" class="loading loading-spinner loading-xs"></span>{{ current.verified ? t('timecut.repeatVerified') : phase(current.phase) }}</span>
+      <span role="status" class="phase"><span v-if="busy" class="loading loading-spinner loading-xs"></span>{{ reportPhase(current) }}</span>
     </div>
     <p class="report-path" :title="current.source" dir="auto">{{ current.source }}</p>
-    <p v-if="current.safe_at" class="safe-note" role="status" data-testid="originals-safe">
+    <p v-if="current.local_errors" class="issue-list" role="status">{{ t('timecut.localRepairCount', { count: n(current.local_errors) }) }} {{ current.local_error }}</p>
+    <p v-else-if="current.safe_at" class="safe-note" role="status" data-testid="originals-safe">
       {{ t('timecut.safeToUnplug') }} · {{ safeTime }}
       <span v-if="receiveDuration"> · {{ t('timecut.receiveDuration', { duration: receiveDuration }) }}</span>
     </p>
@@ -72,7 +73,7 @@
       <summary>{{ t('timecut.history') }}</summary>
       <ol><li v-for="(item, i) in recent" :key="i">
         <span class="history-name" dir="auto">{{ item.source }}</span>
-        <span class="history-detail">{{ item.verified ? t('timecut.repeatVerified') : phase(item.phase) }} · {{ t(item.capture ? 'timecut.receiptHistory' : 'timecut.historyCounts', item) }}</span>
+        <span class="history-detail">{{ reportPhase(item) }} · {{ t(item.capture ? 'timecut.receiptHistory' : 'timecut.historyCounts', item) }}</span>
         <ul v-if="item.issues?.length" class="issue-list"><li v-for="(issue, j) in item.issues" :key="j">{{ issue }}</li></ul>
       </li></ol>
     </details>
@@ -115,6 +116,10 @@ const phases = {
   '未发现可读照片或视频': 'empty', '已完成': 'complete',
 };
 const phase = value => phases[value] ? t('timecut.' + phases[value]) : value;
+function reportPhase(report) {
+  if (report.local_errors || report.phase === '本地收件待修复') return t('timecut.localRepair');
+  return report.verified ? t('timecut.repeatVerified') : phase(report.phase);
+}
 const transferSize = computed(() => {
   const { transferred_bytes = 0, total_bytes } = props.current;
   const transferred = formatFileSize(transferred_bytes);

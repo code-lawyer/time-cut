@@ -409,12 +409,14 @@ const visibleButtons = computed(() =>
     .sort((a, b) => a.index - b.index)
 );
 
-watch(() => config.settings.face.enabled, (enabled) => {
-  void invoke('timecut_face_auto', { enabled: !!enabled }).catch(console.error);
+function syncAutoFaces() {
+  const enabled = !!config.settings.face.enabled;
+  void invoke('timecut_face_auto', { enabled, clusterEpsilon: config.faceClusterEpsilon }).catch(console.error);
   if (!enabled && config.main.sidebarIndex === SIDEBAR.PERSON) {
     config.main.sidebarIndex = SIDEBAR.ALBUM;
   }
-});
+}
+watch(() => [config.settings.face.enabled, config.faceClusterEpsilon], syncAutoFaces);
 
 watch(() => config.libraryChangedVersion, async () => {
   appConfig.value = await getAppConfig();
@@ -502,7 +504,7 @@ onMounted(async () => {
   });
 
   appConfig.value = await getAppConfig();
-  void invoke('timecut_face_auto', { enabled: !!config.settings.face.enabled }).catch(console.error);
+  syncAutoFaces();
 
   void checkLibraryEmpty();
 

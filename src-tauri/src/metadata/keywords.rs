@@ -133,10 +133,8 @@ pub fn import_backend(tags: &[Tag], meta: &mut XmpMetadata) {
     }
 }
 
-pub fn writable_property(uri: &str, name: &[u8]) -> bool {
-    std::str::from_utf8(name)
-        .ok()
-        .and_then(|name| format(uri, name))
+pub fn writable_property(uri: &str, name: &str) -> bool {
+    format(uri, name)
         .is_some_and(|(_, f)| f.write != WriteRule::Preserve)
 }
 
@@ -327,7 +325,7 @@ mod tests {
         let paths = vec!["Places|Paris".into()];
         assert_eq!(parsed.hierarchical_tags, Some(paths.clone()));
         assert_eq!(embedded(&xml).hierarchical_tags, Some(paths.clone()));
-        assert!(writable_property("urn:lap:test-keywords", b"paths"));
+        assert!(writable_property("urn:lap:test-keywords", "paths"));
         let mut writer = TagWriter::default();
         writer.observe("urn:lap:test-keywords", "paths");
         let output = writer.render(&["Paris".into()], Some(&paths));
@@ -354,7 +352,7 @@ mod tests {
         .unwrap();
         assert_eq!(empty.tags, Some(vec![]));
         assert_eq!(empty.hierarchical_tags, Some(vec![]));
-        assert!(writable_property(NS_ACDSEE, b"categories"));
+        assert!(writable_property(NS_ACDSEE, "categories"));
         let mut writer = TagWriter::default();
         assert!(!writer.render(&[], Some(&[])).contains("categories"));
         writer.observe(NS_ACDSEE, "categories");

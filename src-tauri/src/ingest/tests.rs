@@ -814,7 +814,7 @@ fn final_metadata_check_rejects_an_edit_with_unchanged_count_handle_and_size() {
 }
 
 #[test]
-fn phone_receipts_survive_interruption_then_file_offline_and_repeat_without_reading() {
+fn phone_receipts_survive_interruption_then_file_offline_and_verify_the_repeat_streams() {
     let temp = Sandbox::new();
     let dest = temp.dir("archive");
     let entries: [(&str, &[u8]); 4] = [
@@ -846,7 +846,8 @@ fn phone_receipts_survive_interruption_then_file_offline_and_repeat_without_read
     assert!(originals(&dest).is_empty());
     archive.reconcile().unwrap();
     let mut added = 0;
-    while let Some(new) = super::inbox::file_next(&mut archive).unwrap() {
+    while let Some(outcome) = super::inbox::file_next(&mut archive).unwrap() {
+        let super::inbox::Filed::Original(new) = outcome else { panic!("valid receipt was deferred") };
         added += u32::from(new);
     }
     assert_eq!(added, 3);
@@ -859,8 +860,7 @@ fn phone_receipts_survive_interruption_then_file_offline_and_repeat_without_read
     assert!(jpg.with_extension("MOV").is_file());
     assert!(jpg.with_extension("AAE").is_file());
     drop(archive);
-    // A read of the first exact-version original would now fail the size check.
-    let repeat = capture_fixture(&dest, fixture(3, &entries, Some(0)), 4);
+    let repeat = capture_fixture(&dest, fixture(3, &entries, None), 4);
     assert!(repeat.safe_at.is_some());
     assert_eq!(
         (
@@ -869,9 +869,121 @@ fn phone_receipts_survive_interruption_then_file_offline_and_repeat_without_read
             repeat.received_bytes,
             repeat.compared_bytes
         ),
-        (0, 4, 0, 0)
+        (0, 4, 0, entries.iter().map(|(_, bytes)| bytes.len() as u64).sum())
     );
     assert_eq!(repeat.inventory, release.inventory);
+    let short = capture_fixture(&dest, fixture(4, &entries, Some(0)), 4);
+    assert!(short.safe_at.is_none());
+}
+
+#[test]
+fn repeating_with_identical_device_metadata_preserves_both_contents_of_an_edit() {
+    let temp = Sandbox::new();
+    let root = temp.dir("archive");
+    for (session, bytes) in [(1, b"first"), (2, b"later")] {
+        let report = capture_fixture(&root, fixture(session, &[("DCIM/same.jpg", bytes)], None), 1);
+        assert!(report.safe_at.is_some(), "{:?}", report.issues);
+        assert_eq!(report.added, 1);
+        if session == 2 { assert_eq!(report.compared_bytes, 5); }
+        let mut archive = Archive::open(&root).unwrap();
+        while super::inbox::file_next(&mut archive).unwrap().is_some() {}
+    }
+    let mut saved: Vec<_> = originals(&root).into_iter().map(|path| fs::read(path).unwrap()).collect();
+    saved.sort();
+    assert_eq!(saved, vec![b"first".to_vec(), b"later".to_vec()]);
+}
+
+#[test]
+fn same_version_change_is_not_released_if_the_independent_stream_disagrees() {
+    struct Unstable(DeviceFixture);
+    impl Source for Unstable {
+        fn identity(&self) -> &str { self.0.identity() }
+        fn visit(&self, emit: &mut dyn FnMut(ScanEvent) -> Result<()>) -> Result<()> {
+            self.0.visit(emit)
+        }
+        fn reader(&self, item: &Item) -> Result<Box<dyn Read>> {
+            let second = !self.0.reads.borrow().is_empty();
+            let reader = self.0.reader(item)?;
+            if second { Ok(Box::new(Cursor::new(b"first"))) } else { Ok(reader) }
+        }
+    }
+    let history = [b"first", b"other"];
+    for count in 1..=history.len() {
+        let temp = Sandbox::new();
+        let root = temp.dir("archive");
+        for bytes in &history[..count] {
+            assert!(capture_fixture(&root,fixture(1,&[("a.jpg",*bytes)],None),1).safe_at.is_some());
+            let mut archive = Archive::open(&root).unwrap();
+            assert_eq!(super::inbox::file_next(&mut archive).unwrap(),Some(super::inbox::Filed::Original(true)));
+        }
+        let report = super::capture::receive(&root,"camera",|_| Ok(1),
+            || Ok(Box::new(Unstable(fixture(2,&[("a.jpg",b"later")],None)))),
+            |_| {}, || Ok(()), || Ok(()));
+        assert!(report.safe_at.is_none(), "conflicting prior contents: {count}");
+        assert_eq!(report.added,0);
+        assert_eq!(originals(&root).len(),count);
+        assert_eq!(fs::read_dir(root.join(".time-cut/inbox")).unwrap().count(),0);
+    }
+}
+
+#[test]
+fn damaged_receipt_yields_to_other_families_and_recovers_its_own_companions() {
+    use super::inbox::{self, Filed};
+    let temp = Sandbox::new();
+    let root = temp.dir("archive");
+    let entries: &[(&str,&[u8])] = &[("DCIM/A.jpg",b"one"),("DCIM/A.AAE",b"edit"),("DCIM/B.jpg",b"two")];
+    let first = capture_fixture(&root,fixture(1,entries,None),3);
+    assert!(first.safe_at.is_some());
+    let mut archive = Archive::open(&root).unwrap();
+    let blob: String = archive.db.query_row("SELECT blob FROM phone_inbox WHERE entry='DCIM/A.jpg'",
+        [],|r|r.get(0)).unwrap();
+    let path = root.join(".time-cut/inbox").join(&blob);
+    fs::write(&path, b"bad").unwrap();
+    let mut outcomes = Vec::new();
+    while let Some(item) = inbox::file_next(&mut archive).unwrap() { outcomes.push(item); }
+    assert_eq!(outcomes.iter().filter(|item| **item == Filed::Original(true)).count(), 1);
+    assert_eq!(outcomes.iter().filter(|item| **item == Filed::Deferred).count(), 2);
+    assert_eq!(fs::read(&path).unwrap(), b"bad");
+    assert_eq!(inbox::pending_local(&archive.db).unwrap(),2);
+    assert_eq!(inbox::local_errors(&archive.db).unwrap().0,2);
+    assert!(!inbox::has_due_filing(&archive.db).unwrap());
+    // A subsequent phone pass reacquires the damaged original; earlier bad
+    // bytes stay recoverable and the healthy item's original is not duplicated.
+    drop(archive);
+    let repaired = capture_fixture(&root, fixture(2,entries,None),3);
+    assert!(repaired.safe_at.is_some(), "{:?}",repaired.issues);
+    let mut archive = Archive::open(&root).unwrap();
+    archive.db.execute("UPDATE phone_local_retries SET retry_at=0", []).unwrap();
+    while let Some(item) = inbox::file_next(&mut archive).unwrap() {
+        assert!(matches!(item, Filed::Original(_)));
+    }
+    inbox::recover(&archive).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"bad");
+    assert_eq!(originals(&root).len(),3);
+    assert_eq!(inbox::pending_local(&archive.db).unwrap(),0);
+    assert_eq!(inbox::local_errors(&archive.db).unwrap(),(0,None));
+}
+
+#[test]
+fn closed_folder_checkpoints_compact_only_when_the_final_manifest_confirms_the_item() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    super::inbox::initialize(&db).unwrap();
+    db.execute_batch("INSERT INTO phone_runs(id,source,started,safe_at) VALUES
+        (1,'camera',1,2), (2,'camera',3,NULL), (3,'other-camera',1,2);
+        INSERT INTO phone_folder_items VALUES
+        (1,'DCIM',1,'DCIM/a.jpg','v',4,'t'),(1,'DCIM',2,'DCIM/b.jpg','old',4,'t'),
+        (1,'DCIM',3,'DCIM/c.aae','v',4,'t'),(1,'DCIM',4,'DCIM/c.aae','v',4,'t'),
+        (2,'DCIM',1,'DCIM/a.jpg','v',4,'t'),(3,'DCIM',1,'DCIM/a.jpg','v',4,'t');
+        INSERT INTO phone_list_items VALUES
+        (1,1,'DCIM/a.jpg','v',4,'t','hash'),(1,2,'DCIM/b.jpg','new',4,'t','other'),
+        (1,3,'DCIM/c.aae','v',4,'t','hash'),
+        (2,1,'DCIM/a.jpg','v',4,'t','hash'),(3,1,'DCIM/a.jpg','v',4,'t','hash');
+        INSERT INTO phone_manifest SELECT run_id,ordinal,entry,version,digest,size FROM phone_list_items;").unwrap();
+    super::inventory::compact_folder_checkpoints(&db,"camera").unwrap();
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM phone_folder_items",[],|r|r.get::<_,i64>(0)).unwrap(),5);
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM phone_folder_items WHERE run_id=1 AND entry='DCIM/b.jpg'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM phone_manifest",[],|r|r.get::<_,i64>(0)).unwrap(),5);
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM phone_list_items",[],|r|r.get::<_,i64>(0)).unwrap(),5);
 }
 
 #[test]
@@ -924,12 +1036,12 @@ fn two_different_known_contents_restore_single_read_capture_after_a_fault() {
     let archive=Archive::open(&root).unwrap();
     let phone=fixture(2,&files,None);
     let mut check=super::inbox::RecoveryCheck::new(true);
-    for &(index,expected_check_bytes) in &[(0,5),(0,0),(1,5),(2,0)] {
+    for &(index,expected_check_bytes) in &[(0,5),(0,5),(1,5),(2,0)] {
         let result=super::inbox::receive(&archive,1,&phone,&phone.files[index].0,true,
             &mut check,||Ok(()),|_,_|Ok(())).unwrap();
         assert_eq!(result.compared,expected_check_bytes);
     }
-    assert_eq!(&*phone.reads.borrow(), &["2-0", "2-1", "2-2"]);
+    assert_eq!(&*phone.reads.borrow(), &["2-0", "2-0", "2-1", "2-2"]);
 }
 
 #[test]
@@ -984,10 +1096,10 @@ fn old_gallery_remapped_versions_compare_without_copy_and_changed_equal_size_is_
         |_| {},
     );
     assert_eq!(legacy.added, 2);
-    let unchanged = capture_fixture(&dest, fixture(2, &entries, Some(0)), 2);
+    let unchanged = capture_fixture(&dest, fixture(2, &entries, None), 2);
     assert_eq!(
         (unchanged.added, unchanged.skipped, unchanged.compared_bytes),
-        (0, 2, 0)
+        (0, 2, 9)
     );
     let changed: [(&str, &[u8]); 3] = [entries[0], entries[1], ("DCIM/test.AAE", b"next")];
     let mut remapped = fixture(3, &changed, None);
@@ -1038,7 +1150,7 @@ fn same_size_edit_with_restored_date_invalidates_a_local_receipt() {
             .safe_at
             .is_none()
     );
-    let checked = capture_fixture(&dest, fixture(2, &entries, Some(0)), 2);
+    let checked = capture_fixture(&dest, fixture(2, &entries, None), 2);
     assert_eq!((checked.added, checked.skipped), (0, 1));
     let spool = fs::read_dir(dest.join(".time-cut/inbox"))
         .unwrap()

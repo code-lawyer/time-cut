@@ -108,6 +108,7 @@ const serviceError = computed(() => statusError.value || indexError.value);
 const opener = ref(null), dialog = ref(null);
 const current = computed(() => state.value.report?.phase ? state.value.report : state.value.recent[0]);
 const importLabel = computed(() => {
+  if (current.value?.local_errors) return t('timecut.localRepair');
   if (current.value?.safe_at) return t('timecut.safeToUnplug');
   if (!state.value.busy) return t('timecut.title');
   const report = state.value.report;

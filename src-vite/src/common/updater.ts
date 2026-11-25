@@ -5,6 +5,9 @@ import { openExternalUrl } from '@/common/api';
 import { useToast, type ToastPlacement } from '@/common/toast';
 import { i18n } from '@/common/i18n';
 
+export const updaterEnabled = import.meta.env.VITE_TIMECUT_UPDATER === '1';
+export const projectRepository = (import.meta.env.VITE_TIMECUT_REPOSITORY_URL || '').replace(/\/$/, '');
+
 const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000;
 const UPDATE_CHECK_KEY = 'lap_last_update_check';
 const UPDATE_RELEASE_NOTE_KEY = 'lap_update_release_note_version';
@@ -72,8 +75,8 @@ export function useAppUpdater(localeMsg: Ref<any>, options: AppUpdaterOptions = 
     return isReleaseNoteVisible.value ? localStorage.getItem(UPDATE_RELEASE_NOTE_KEY) || '' : '';
   });
   const releaseNoteUrl = computed(() => {
-    if (!releaseNoteVersion.value) return '';
-    return `https://github.com/julyx10/lap/releases/tag/v${releaseNoteVersion.value}`;
+    if (!projectRepository || !releaseNoteVersion.value) return '';
+    return `${projectRepository}/releases/tag/v${releaseNoteVersion.value}`;
   });
   const downloadProgressLabel = computed(() => {
     if (downloadPercent.value === null) {
@@ -141,7 +144,7 @@ export function useAppUpdater(localeMsg: Ref<any>, options: AppUpdaterOptions = 
   }
 
   function loadReleaseNoteState() {
-    isReleaseNoteVisible.value = !!localStorage.getItem(UPDATE_RELEASE_NOTE_KEY);
+    isReleaseNoteVisible.value = updaterEnabled && !!projectRepository && !!localStorage.getItem(UPDATE_RELEASE_NOTE_KEY);
   }
 
   async function checkWithTimeout() {
@@ -192,7 +195,7 @@ export function useAppUpdater(localeMsg: Ref<any>, options: AppUpdaterOptions = 
   }
 
   async function checkForUpdates(manual = false) {
-    if (import.meta.env.VITE_TIMECUT_UPDATER !== '1') {
+    if (!updaterEnabled) {
       if (manual && !silent) toast.info(i18n.global.t('timecut.updateNotice'), { placement: toastPlacement });
       return;
     }

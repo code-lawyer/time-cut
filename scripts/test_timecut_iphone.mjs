@@ -4,19 +4,32 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
+import { verifyLocalGallery, verifyOriginals } from './verify_timecut_archive.mjs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const executable = path.resolve(process.argv[2]);
 const testRoot = path.resolve('.timecut-build');
-const resuming = Boolean(process.argv[3]);
 const verifyLocal = process.argv[4] === '--verify-local';
-assert.ok(!verifyLocal || resuming);
-const root = resuming ? path.resolve(process.argv[3]) : fs.mkdtempSync(path.join(testRoot, 'iphone-full-'));
+assert.ok(!verifyLocal || process.argv[3]);
+const root = process.argv[3] ? path.resolve(process.argv[3]) : fs.mkdtempSync(path.join(testRoot, 'iphone-full-'));
 assert.ok(path.dirname(root) === testRoot && path.basename(root).startsWith('iphone-full-'));
 const archive = path.join(root, 'originals');
 const profile = path.join(root, 'profile');
+if (verifyLocal) {
+  const totals = verifyLocalGallery(executable, archive, profile);
+  fs.writeFileSync(path.join(root, 'local-verification.json'), JSON.stringify(totals, null, 2));
+  console.log(JSON.stringify(totals));
+  process.exit(0);
+}
+const resuming = fs.existsSync(path.join(root, 'result.json'));
+if (process.argv[3] && !resuming) {
+  const baseline = JSON.parse(fs.readFileSync(path.join(root, 'baseline.json'), 'utf8'));
+  assert.equal(baseline.state, 'waiting_for_user_to_connect');
+  assert.equal(baseline.importStarted, false);
+  for (const folder of [archive, profile]) assert.equal(fs.readdirSync(folder).length, 0);
+}
 const evidence = resuming ? JSON.parse(fs.readFileSync(path.join(root, 'result.json'), 'utf8')) :
   { stage: 'starting', root, started: new Date().toISOString() };
 if (resuming) {
@@ -33,10 +46,9 @@ if (resuming) {
   delete evidence.finished;
   evidence.started = new Date().toISOString();
 }
-const continuingCopy = !verifyLocal;
 const photoTypes = new Set(['.jpg', '.jpeg', '.heic', '.heif', '.hif', '.png', '.gif', '.webp', '.dng', '.tif', '.tiff', '.bmp', '.avif', '.jxl']);
 const videoTypes = new Set(['.mp4', '.mov', '.m4v', '.3gp', '.3g2', '.avi', '.mkv', '.mts', '.webm', '.wmv', '.mpg', '.mpeg', '.ts']);
-if (!resuming) fs.mkdirSync(archive);
+if (!resuming) fs.mkdirSync(archive, { recursive: true });
 function save(fields) {
   Object.assign(evidence, fields);
   const draft = path.join(root, 'result.next.json');
@@ -128,10 +140,10 @@ const usb = async () => {
   return state;
 };
 const latestHistoryId = () => history.prepare('SELECT COALESCE(MAX(id),0) AS id FROM history').get().id;
-function completedPhoneRunAfter(id) {
+function completedPhoneRunAfter(id, afterSafeAt) {
   return history.prepare('SELECT id,data FROM history WHERE id > ? ORDER BY id DESC').all(id)
     .map(row => ({ id: row.id, ...JSON.parse(row.data) }))
-    .find(report => fromIPhone(report) && (report.safe_at || report.phase === '已完成')
+    .find(report => fromIPhone(report) && report.safe_at > afterSafeAt && !report.local_errors
       && report.failed === 0 && report.added + report.skipped === report.discovered && report.discovered > 0);
 }
 
@@ -163,7 +175,7 @@ try {
   await send('Runtime.enable', {});
   await waitFor(() => page(() => !!document.querySelector('[data-testid=import-open]')), 'loading the import screen', 30);
   const version = await invoke('plugin:app|version');
-  if (!verifyLocal) await invoke('timecut_configure', { path: archive, auto: false });
+  await invoke('timecut_configure', { path: archive, auto: false });
   const owner = await waitFor(async () => {
     const { target } = await invoke('timecut_status');
     return target && path.resolve(target.root) === archive && target;
@@ -172,10 +184,8 @@ try {
   await page(() => {
     if (!document.querySelector('[data-testid=import-dialog]')) document.querySelector('[data-testid=import-open]').click();
   });
-  if (!verifyLocal) {
-    await waitFor(async () => (await usb()).devices.length === 1, 'detecting the attached iPhone', 30);
-    history = new DatabaseSync(path.join(profile, 'import-control.sqlite3'), { readOnly: true, timeout: 3000 });
-  }
+  await waitFor(async () => (await usb()).devices.length === 1, 'detecting the attached iPhone', 30);
+  history = new DatabaseSync(path.join(profile, 'import-control.sqlite3'), { readOnly: true, timeout: 3000 });
   const archiveDb = path.join(archive, '.time-cut', 'imports.sqlite3');
   ingest = new DatabaseSync(archiveDb, { readOnly: true, timeout: 3000 });
   const stats = ingest.prepare('SELECT COUNT(*) AS originals, COALESCE(SUM(size),0) AS bytes FROM files');
@@ -194,11 +204,11 @@ try {
   let highWater = { scanned: 1, originals: 0, addedOrSkipped: 0, bytes: 0 };
   let previousAttempt = null;
   const expectedMinimum = evidence.firstTransfer?.discovered ?? 1;
-  const transferAfter = history ? latestHistoryId() : 0;
-  save({ stage: continuingCopy ? 'transferring' : 'indexing',
+  const transferAfter = latestHistoryId();
+  save({ stage: 'transferring',
     version: evidence.version ?? version, verificationVersion: version, owner, appPid: app.pid });
-  if (continuingCopy) await invoke('timecut_set_auto', { auto: true });
-  const result = !continuingCopy ? evidence.transfer ?? evidence.firstTransfer : await waitFor(async () => {
+  await invoke('timecut_set_auto', { auto: true });
+  const result = await waitFor(async () => {
     const state = await usb();
     const report = compact(state.report);
     const files = stats.get();
@@ -236,7 +246,7 @@ try {
     }
     const issues = state.report.issues.flatMap(issue => issue.match(/0x[0-9a-f]{8}|手机原件流提前结束|手机原件长度在传输途中发生变化|未看到手机存储|暂不可读|拒绝访问/gi) ?? []);
     save({ elapsedMs, report, ...files, detected: state.devices.length === 1, issueKinds: [...new Set(issues)] });
-    const terminal = completedPhoneRunAfter(transferAfter);
+    const terminal = completedPhoneRunAfter(transferAfter, started - 1);
     if (terminal) {
       assert.ok(terminal.discovered >= expectedMinimum,
         `This scan exposed only ${terminal.discovered} items; the previous scan found ${expectedMinimum}`);
@@ -249,12 +259,16 @@ try {
   assert.ok(result, 'An initial USB report is required');
   save({ stage: 'indexing', transfer: result });
   if (result.safe_at) {
-    await waitFor(() => ingest.prepare('SELECT count(*) AS count FROM phone_inbox WHERE released=1').get().count === 0,
+    await waitFor(async () => {
+      const state = await usb();
+      if (state.report.local_errors) throw Error(state.report.local_error || 'Some originals could not be filed');
+      return ingest.prepare('SELECT count(*) AS count FROM phone_inbox WHERE released=1').get().count === 0;
+    },
       'filing originals locally after the phone is released', Infinity, 2000);
   }
   catalog = new DatabaseSync(path.join(profile, 'libraries', owner.library + '.db'), { readOnly: true, timeout: 3000 });
   const files = ingest.prepare('SELECT path,size,digest FROM files').all();
-  if (verifyLocal || result.safe_at) {
+  if (result.safe_at) {
     const normalize = name => path.normalize(name).toLowerCase();
     const originals = files.filter(file => !['.aae', '.xmp'].includes(path.extname(file.path).toLowerCase()));
     const indexed = catalog.prepare('SELECT b.path AS directory,a.name FROM afiles a JOIN afolders b ON a.folder_id=b.id WHERE b.album_id=?');
@@ -274,32 +288,23 @@ try {
     count(*) FILTER (WHERE a.geo_name IS NOT NULL) AS located
     FROM afiles a JOIN afolders b ON a.folder_id=b.id WHERE b.album_id=?`).get(owner.album);
   assert.ok(media.indexedMedia > 0 && media.photos > 0);
-  if (!verifyLocal) {
-    assert.equal(result.added + result.skipped, result.discovered, 'Every visible entry was accounted for');
-  }
+  assert.equal(result.added + result.skipped, result.discovered, 'Every visible entry was accounted for');
   const sources = ingest.prepare('SELECT count(*) AS count FROM sources').get().count;
   // WPD can expose multiple objects under the same display path. A source
   // entry can represent more than one archived file over the course of a scan.
   assert.ok(sources > 0 && files.length >= result.added, 'The archive covers the completed transfers');
-  for (const file of files) {
-    const local = path.resolve(archive, file.path);
-    assert.ok(local.startsWith(archive + path.sep), 'Original stays within the test archive');
-    assert.ok(file.digest.length === 64 && fs.statSync(local).size === file.size, 'Original matches the recorded length');
-  }
+  const verified = verifyOriginals(executable, archive);
+  assert.equal(verified.filesVerified, files.length);
   assert.equal(fs.readdirSync(path.join(archive, '.time-cut', 'staging')).length, 0);
-  save({ stage: 'verifying', sources, catalog: media, originalLengthsVerified: files.length });
+  save({ stage: 'verifying', sources, catalog: media, originalContentVerified: verified });
 
-  // Re-read the connected device without unplugging. The dedup path verifies the
-  // BLAKE3 digest of the archived file against the recorded digest from the USB stream.
-  if (!verifyLocal) {
-    const repeatAfter = latestHistoryId();
-    await invoke('timecut_retry');
-    const repeat = await waitFor(() => completedPhoneRunAfter(repeatAfter),
-      'checking deduplication from the same connected phone', Infinity, 2500);
-    assert.deepEqual([repeat.added, repeat.skipped, repeat.failed], [0, result.discovered, 0]);
-    if (result.inventory) assert.equal(repeat.inventory, result.inventory);
-    save({ repeat: compact(repeat), repeatHistoryId: repeat.id });
-  }
+  const repeatAfter = latestHistoryId();
+  await invoke('timecut_retry');
+  const repeat = await waitFor(() => completedPhoneRunAfter(repeatAfter, result.safe_at),
+    'checking deduplication from the same connected phone', Infinity, 2500);
+  assert.deepEqual([repeat.added, repeat.skipped, repeat.failed], [0, result.discovered, 0]);
+  if (result.inventory) assert.equal(repeat.inventory, result.inventory);
+  save({ repeat: compact(repeat), repeatHistoryId: repeat.id });
   const repeatSource = fs.mkdtempSync(path.join(root, 'duplicate-sample-'));
   const sample = files.find(file => photoTypes.has(path.extname(file.path).toLowerCase()));
   assert.ok(sample);
@@ -341,7 +346,7 @@ try {
     save({ decodedVideo: true });
   }
   assert.deepEqual(errors, []);
-  save({ stage: verifyLocal ? 'local-verified' : 'passed', finished: new Date().toISOString() });
+  save({ stage: 'passed', finished: new Date().toISOString() });
 } catch (error) {
   save({ stage: 'failed', error: error.message });
   console.error(error.message);

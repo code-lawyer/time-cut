@@ -242,7 +242,7 @@ fn boxes(bytes: &[u8], depth: usize, out: &mut Vec<Vec<u8>>) {
 
 fn extended_guid(packet: &[u8]) -> Option<String> {
     use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
-    const NS: &[u8] = b"http://ns.adobe.com/xmp/note/";
+    const NS: &str = "http://ns.adobe.com/xmp/note/";
     let xml = decode(packet)?;
     let mut reader = NsReader::from_str(&xml);
     loop {
@@ -252,12 +252,11 @@ fn extended_guid(packet: &[u8]) -> Option<String> {
             Event::Start(e) | Event::Empty(e) => {
                 for attr in e.attributes() {
                     let attr = attr.ok()?;
-                    let (ns, name) = reader.resolve_attribute(attr.key);
+                    let (ns, name) = reader.resolver().resolve_attribute(attr.key);
                     if matches!(ns, ResolveResult::Bound(uri) if uri.as_ref() == NS)
-                        && name.as_ref() == b"HasExtendedXMP"
+                        && name.as_ref() == "HasExtendedXMP"
                     {
-                        let value = attr
-                            .decode_and_unescape_value(reader.decoder())
+                        let value = quick_xml::escape::unescape(&attr.value)
                             .ok()?
                             .into_owned();
                         if value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -265,10 +264,10 @@ fn extended_guid(packet: &[u8]) -> Option<String> {
                         }
                     }
                 }
-                let (ns, name) = reader.resolve_element(e.name());
+                let (ns, name) = reader.resolver().resolve_element(e.name());
                 if is_start
                     && matches!(ns, ResolveResult::Bound(uri) if uri.as_ref() == NS)
-                    && name.as_ref() == b"HasExtendedXMP"
+                    && name.as_ref() == "HasExtendedXMP"
                 {
                     let value = reader.read_text(e.name()).ok()?.trim().to_owned();
                     if value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit()) {

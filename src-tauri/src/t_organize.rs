@@ -7,11 +7,7 @@ use crate::t_sqlite::{self, AFile, AThumb, Face};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-    mpsc,
-};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Listener, Manager, State};
 
@@ -348,7 +344,7 @@ struct WorkerView {
 pub struct Organizer {
     wake: mpsc::Sender<()>,
     view: Arc<Mutex<WorkerView>>,
-    auto_faces: Arc<AtomicBool>,
+    auto_faces: Arc<Mutex<Option<f32>>>,
 }
 
 #[derive(Serialize)]
@@ -442,10 +438,11 @@ pub fn timecut_set_scene_auto(
 #[tauri::command]
 pub fn timecut_face_auto(
     enabled: bool,
+    cluster_epsilon: Option<f32>,
     state: State<Organizer>,
     cancel: State<FaceIndexCancellation>,
 ) {
-    state.auto_faces.store(enabled, Ordering::Relaxed);
+    *state.auto_faces.lock().unwrap() = enabled.then_some(cluster_epsilon.unwrap_or(0.55));
     if !enabled {
         *cancel.0.lock().unwrap() = true;
     }
@@ -536,13 +533,14 @@ fn arrange_batch(
     Ok(SceneBatch::Processed)
 }
 
-fn start_face_batch(app: &AppHandle, library: &str) -> Result<bool, String> {
+fn start_face_batch(app: &AppHandle, library: &str, epsilon: f32) -> Result<(bool, Option<Duration>), String> {
     let status = app.state::<FaceIndexingStatus>();
     if *status.0.lock().unwrap() {
-        return Ok(true);
+        return Ok((true, None));
     }
-    if !with_current_library(library, Face::has_work)? {
-        return Ok(false);
+    let (ready, retry_in) = with_current_library(library, Face::scheduled_work)?;
+    if !ready {
+        return Ok((false, retry_in.map(Duration::from_secs)));
     }
     t_face::run_face_indexing(
         app.clone(),
@@ -550,9 +548,10 @@ fn start_face_batch(app: &AppHandle, library: &str) -> Result<bool, String> {
         app.state::<FaceIndexCancellation>().inner().clone(),
         status.inner().clone(),
         app.state::<FaceIndexProgressState>().inner().clone(),
-        None,
+        epsilon,
+        true,
     )?;
-    Ok(true)
+    Ok((true, None))
 }
 
 struct IdleLibrary {
@@ -569,7 +568,7 @@ impl IdleLibrary {
 pub fn start(app: AppHandle) {
     let (wake, receiver) = mpsc::channel();
     let view = Arc::new(Mutex::new(WorkerView::default()));
-    let auto_faces = Arc::new(AtomicBool::new(false));
+    let auto_faces = Arc::new(Mutex::new(None));
     app.listen("index_finished", {
         let wake = wake.clone();
         move |_| {
@@ -595,14 +594,16 @@ pub fn start(app: AppHandle) {
                     return Ok(false);
                 }
                 idle = None;
-                let faces_enabled = auto_faces.load(Ordering::Relaxed);
-                let mut faces_idle = !faces_enabled;
-                if faces_enabled && last_faces.as_ref().is_none_or(|(previous, time)| {
+                let auto_threshold = *auto_faces.lock().unwrap();
+                let mut faces_idle = auto_threshold.is_none();
+                let mut face_retry = None;
+                if let Some(epsilon) = auto_threshold
+                    && last_faces.as_ref().is_none_or(|(previous, time)| {
                     previous != &library || time.elapsed() >= Duration::from_secs(60)
                 }) {
-                    match start_face_batch(&app, &library) {
-                        Ok(false) => faces_idle = true,
-                        Ok(true) => last_faces = Some((library.clone(), Instant::now())),
+                    match start_face_batch(&app, &library, epsilon) {
+                        Ok((false, retry_in)) => { faces_idle = true; face_retry = retry_in; }
+                        Ok((true, _)) => last_faces = Some((library.clone(), Instant::now())),
                         Err(_) => {}
                     }
                 }
@@ -622,7 +623,7 @@ pub fn start(app: AppHandle) {
                         if faces_idle {
                             idle = revision.map(|revision| IdleLibrary {
                                 revision,
-                                retry_at: retry_in.map(|delay| Instant::now() + delay),
+                                retry_at: retry_in.into_iter().chain(face_retry).min().map(|delay| Instant::now() + delay),
                             });
                         }
                         Ok(false)

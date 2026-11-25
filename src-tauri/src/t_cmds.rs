@@ -4906,7 +4906,8 @@ pub fn index_faces(
         (*cancel_state).clone(),
         (*status_state).clone(),
         (*progress_state).clone(),
-        cluster_epsilon,
+        cluster_epsilon.unwrap_or(0.55),
+        false,
     )
 }
 

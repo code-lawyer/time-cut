@@ -415,6 +415,16 @@ FFmpeg includes optional third-party codec libraries. Their exact versions and l
 Notice [108]: FFmpeg-COPYING.GPLv2
 Notice [109]: FFmpeg-COPYING.GPLv3
 
+Time-cut Windows x64 portable package: FFmpeg / ffprobe 8.1
+The x64 executables identify themselves as Gyan 8.1 essentials_build, built with GPL and version3 enabled.
+Binary distributor: https://github.com/GyanD/codexffmpeg/releases/tag/8.1
+FFmpeg source revision identified by that distributor: https://github.com/FFmpeg/FFmpeg/commit/9047fa1b08
+Distributed x64 sidecars and pinned SHA-256 (Lap mirror, tag ffmpeg-8.1):
+ffmpeg asset 405019646: 1a65d5b0b10d8d9a81d2824a3538046a40ed3607c906b335a166add87613f705
+ffprobe asset 405019652: 54b944d6095c4588d7548424d7acd5118390a9d4f01b1c92f841547fc9a7429c
+Run either executable with -buildconf to display the exact enabled third-party components.
+See https://www.gyan.dev/ffmpeg/builds/ for the distributor's build information and Notice [109] for GPL version 3.
+
 OpenCV Zoo YuNet and SFace model weights
 https://github.com/opencv/opencv_zoo/tree/47534e27c9851bb1128ccc0102f1145e27f23f98/models
 The Time-cut package includes YuNet-LICENSE.txt (MIT) and SFace-LICENSE.txt (Apache-2.0).

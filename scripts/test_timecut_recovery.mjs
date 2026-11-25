@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { verifyOriginals } from './verify_timecut_archive.mjs';
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const executable = path.resolve(process.argv[2]);
@@ -103,13 +104,31 @@ try {
   const copied = files.find((file) => path.extname(file) === '.mp4');
   const verifiedHash = await sha(movie);
   assert.equal(await sha(copied), verifiedHash);
-  assert.equal(await sha(files.find((f) => f.endsWith('.png'))), await sha(photo));
+  const archivedPhoto = files.find((f) => f.endsWith('.png'));
+  assert.equal(await sha(archivedPhoto), await sha(photo));
+  const verified = verifyOriginals(executable, archive);
+  assert.equal(verified.filesVerified, 2);
+  const original = fs.readFileSync(archivedPhoto);
+  const modified = Buffer.from(original);
+  modified[modified.length - 1] ^= 1;
+  let corrupted;
+  try {
+    fs.writeFileSync(archivedPhoto, modified);
+    const check = spawnSync(executable, ['--verify-archive', archive], { env, windowsHide: true, encoding: 'utf8' });
+    assert.equal(check.status, 1);
+    corrupted = JSON.parse(check.stdout);
+    assert.deepEqual([corrupted.filesVerified, corrupted.failed], [1, 1]);
+  } finally {
+    fs.writeFileSync(archivedPhoto, original);
+  }
   Object.assign(report, {
     size,
     interruptedBytes,
     resumed,
     repeat,
     sha256: verifiedHash,
+    verified,
+    sameSizeCorruption: corrupted,
     partialPublished: false,
     stagingAfterRecovery: 0,
   });

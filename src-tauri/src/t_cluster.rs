@@ -255,7 +255,7 @@ where
 {
     let points = with_current_library(library, || {
         let db = t_sqlite::open_conn()?;
-        read_points(&db)
+        if Face::has_unassigned(&db)? { read_points(&db) } else { Ok(Vec::new()) }
     })?;
     if points.iter().all(|point| point.person.is_some()) {
         return Ok(0);

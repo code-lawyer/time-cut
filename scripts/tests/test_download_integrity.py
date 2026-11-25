@@ -14,6 +14,10 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 class DownloadIntegrityTests(unittest.TestCase):
     def setUp(self):
         self.bash = shutil.which("bash")
+        if os.name == "nt" and shutil.which("git"):
+            git_bash = Path(shutil.which("git")).resolve().parents[1] / "bin/bash.exe"
+            if git_bash.is_file():
+                self.bash = str(git_bash)
         self.assertIsNotNone(self.bash, "bash is required for downloader tests")
         self.temp = tempfile.TemporaryDirectory(prefix="lap-download-test-")
         self.addCleanup(self.temp.cleanup)
@@ -34,10 +38,16 @@ class DownloadIntegrityTests(unittest.TestCase):
             "  fi\n"
             "  shift\n"
             "done\n"
-            "exit 99\n"
+            "exit 99\n", newline="\n"
         )
         curl.chmod(0o755)
         self.env = {**os.environ, "PATH": os.pathsep.join((str(bin_dir), os.environ["PATH"]))}
+        if os.name == "nt":
+            # Git Bash prepends its own bin directory during startup. Select the
+            # fake transport inside the shell before either downloader executes.
+            startup = self.root / "mock-env.sh"
+            startup.write_text('export PATH="$(cygpath -u "$TIMECUT_TEST_BIN"):$PATH"\n', newline="\n")
+            self.env.update(BASH_ENV=startup.as_posix(), TIMECUT_TEST_BIN=str(bin_dir))
 
     def run_downloader(self, script, *args):
         return subprocess.run(

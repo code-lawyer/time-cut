@@ -36,6 +36,20 @@ pub(super) fn initialize(db: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS phone_inbox_ready ON phone_inbox(released,priority,id);
         CREATE INDEX IF NOT EXISTS phone_inbox_blob ON phone_inbox(blob);
         CREATE INDEX IF NOT EXISTS phone_inbox_size ON phone_inbox(size,digest);
+        CREATE TABLE IF NOT EXISTS phone_local_retries(
+        inbox_id INTEGER PRIMARY KEY,source TEXT NOT NULL,family TEXT NOT NULL,priority INTEGER NOT NULL,
+        retry_at INTEGER NOT NULL,error TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS phone_local_retry_family ON phone_local_retries(source,family,priority);
+        CREATE TABLE IF NOT EXISTS phone_preserved_blobs(blob TEXT PRIMARY KEY) WITHOUT ROWID;
+        CREATE TRIGGER IF NOT EXISTS phone_inbox_repaired AFTER UPDATE OF blob,archive_path ON phone_inbox
+        WHEN EXISTS(SELECT 1 FROM phone_local_retries WHERE inbox_id=OLD.id) BEGIN
+            INSERT OR IGNORE INTO phone_preserved_blobs SELECT OLD.blob
+                WHERE OLD.blob IS NOT NULL AND OLD.blob IS NOT NEW.blob;
+            DELETE FROM phone_local_retries WHERE inbox_id=OLD.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS phone_inbox_filed AFTER DELETE ON phone_inbox BEGIN
+            DELETE FROM phone_local_retries WHERE inbox_id=OLD.id;
+        END;
         CREATE TABLE IF NOT EXISTS phone_native_supplements(run_id INTEGER NOT NULL,source TEXT NOT NULL,
         checked_at INTEGER,listed INTEGER,PRIMARY KEY(run_id,source)) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS phone_native_rechecks(run_id INTEGER NOT NULL,source TEXT NOT NULL,
@@ -96,7 +110,7 @@ pub(super) fn recover_files(archive: &Archive) -> Result<()> {
     real_dir(&dir)?;
     let mut used = archive
         .db
-        .prepare("SELECT DISTINCT blob FROM phone_inbox WHERE blob IS NOT NULL")?;
+        .prepare("SELECT blob FROM phone_inbox WHERE blob IS NOT NULL UNION SELECT blob FROM phone_preserved_blobs")?;
     let known = used
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
@@ -360,25 +374,21 @@ pub(super) fn receive_checked(
             Location {blob:r.get(1)?,archived:r.get(2)?},r.get::<_,Option<String>>(3)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (hash, location, known) in &candidates {
-        if source_checksum.is_none() && trust_version && !version.is_empty()
+        if recovery.confirm_unrecognized && source_checksum.is_none() && trust_version && !version.is_empty()
+            && recovery.wants_reference(hash, item.size)
             && known.as_deref() == Some(version)
             && verified_local(archive, &location.path(&archive.root)?, hash)?
         {
             let path = location.path(&archive.root)?;
             let size = fs::symlink_metadata(&path)?.len();
-            let compared = if recovery.wants_reference(hash, item.size) {
-                before_read()?;
-                transfer::confirm(source, item, size, hash, |n| progress(n, ReadPhase::Confirm))?;
-                recovery.matched(hash);
-                db.execute("UPDATE phone_runs SET compared=compared+? WHERE id=?", params![size, run])?;
-                size
-            } else {
-                0
-            };
+            before_read()?;
+            transfer::confirm(source, item, size, hash, |n| progress(n, ReadPhase::Confirm))?;
+            recovery.matched(hash);
+            db.execute("UPDATE phone_runs SET compared=compared+? WHERE id=?", params![size, run])?;
             return Ok(Received {
                 digest: hash.clone(),
                 bytes: 0,
-                compared,
+                compared: size,
                 size,
                 path,
             });
@@ -405,8 +415,30 @@ pub(super) fn receive_checked(
     // those bytes. New content and cross-name matches still get two full reads.
     let recognized = !candidates.is_empty()
         && candidates.iter().all(|(hash, _, _)| hash == &payload.digest);
+    // WPD object metadata is a locator, not a content fingerprint. Only reuse a
+    // prior receipt after comparing this session's actual bytes with that file.
+    // A different payload under the same version also needs an independent read.
+    let exact_version = |known: &Option<String>| !version.is_empty()
+        && known.as_deref() == Some(version);
+    let same_version_changed = candidates.iter().any(|(hash, _, known)|
+        exact_version(known) && hash != &payload.digest);
+    if trust_version && source_checksum.is_none() && !payload.is_new() && !same_version_changed
+        && candidates.iter().any(|(hash, location, known)| exact_version(known)
+            && hash == &payload.digest && location.blob == payload.location.blob
+            && location.archived == payload.location.archived)
+    {
+        if recovery.recheck_object && !source.confirms_returned_object(item)? {
+            return Err(WrongObject.into());
+        }
+        if recovery.wants_reference(&payload.digest, item.size) {
+            recovery.matched(&payload.digest);
+        }
+        db.execute("UPDATE phone_runs SET compared=compared+? WHERE id=?", params![size, run])?;
+        return Ok(Received { digest: payload.digest, bytes: 0, compared: size,
+            path: payload.location.path(&archive.root)?, size });
+    }
     if source_checksum.is_none()
-        && (recovery.required || (recovery.confirm_unrecognized && !recognized))
+        && (same_version_changed || recovery.required || (recovery.confirm_unrecognized && !recognized))
     {
         transfer::confirm(source, item, size, &payload.digest, |n| progress(n, ReadPhase::Confirm))?;
         compared += size;
@@ -492,13 +524,42 @@ pub(super) fn verify_supplement_files(archive: &Archive, run: i64) -> Result<boo
     Ok(true)
 }
 
-pub(super) fn file_next(archive: &mut Archive) -> Result<Option<bool>> {
+pub(super) fn has_due_filing(db: &Connection) -> Result<bool> {
+    // An existing preview archive receives this table on its next writable open.
+    let initialized: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='phone_local_retries')", [], |r| r.get(0))?;
+    if !initialized { return Ok(true); }
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM phone_inbox i WHERE i.released=1
+        AND NOT EXISTS(SELECT 1 FROM phone_local_retries t WHERE t.inbox_id=i.id AND t.retry_at>unixepoch()))",
+        [], |r| r.get(0))?)
+}
+
+pub(super) fn local_errors(db: &Connection) -> Result<(u64, Option<String>)> {
+    Ok(db.query_row("SELECT COUNT(*),MIN(t.error) FROM phone_local_retries t
+        JOIN phone_inbox i ON i.id=t.inbox_id WHERE i.released=1", [],
+        |r| Ok((r.get(0)?,r.get(1)?)))?)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Filed {
+    Original(bool),
+    Deferred,
+}
+
+#[cfg(test)]
+pub(super) fn file_next(archive: &mut Archive) -> Result<Option<Filed>> {
+    file_next_at(archive, chrono::Utc::now().timestamp())
+}
+
+pub(super) fn file_next_at(archive: &mut Archive, pass_started: i64) -> Result<Option<Filed>> {
     let row = archive
         .db
         .query_row(
             "SELECT id,source,entry,version,digest,size,modified,blob,archive_path
-        FROM phone_inbox WHERE released=1 ORDER BY priority,id LIMIT 1",
-            [],
+        FROM phone_inbox i WHERE released=1 AND NOT EXISTS(
+            SELECT 1 FROM phone_local_retries t WHERE t.inbox_id=i.id AND t.retry_at>?)
+        ORDER BY priority,id LIMIT 1",
+            [pass_started],
             |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -519,18 +580,39 @@ pub(super) fn file_next(archive: &mut Archive) -> Result<Option<bool>> {
     let Some((id, source, entry, version, digest, size, modified, location)) = row else {
         return Ok(None);
     };
-    let data = location.path(&archive.root)?;
-    if !contains_digest(&data, &digest)? {
-        return Err(format!("本地收件校验失败：{entry}").into());
-    }
-    let item = Item {
-        id: String::new(),
-        relative: PathBuf::from(entry),
-        version: (!version.is_empty()).then_some(version),
-        modified: modified.as_deref().map(read_time).transpose()?,
-        size: Some(size),
+    let relative = Path::new(&entry);
+    let family = super::archive::family(relative);
+    let priority = if extension(relative) == "xmp" { 2 } else { ordered(relative).0 };
+    let filed = (|| -> Result<_> {
+        // Never file a Live Photo movie or edits under an unrelated fallback
+        // stem while a previously seen primary from this family needs repair.
+        if super::archive::may_have_owner(relative) && archive.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM phone_local_retries WHERE source=? AND family=? AND priority<?)",
+            params![source, family, priority], |r| r.get::<_,bool>(0))? {
+            return Err("正在等待同组原件完成归档".into());
+        }
+        let data = location.path(&archive.root)?;
+        if !contains_digest(&data, &digest)? {
+            return Err("本地收件内容与已存凭据不符".into());
+        }
+        let item = Item {
+            id: String::new(),
+            relative: PathBuf::from(&entry),
+            version: (!version.is_empty()).then_some(version),
+            modified: modified.as_deref().map(read_time).transpose()?,
+            size: Some(size),
+        };
+        let added = archive.file_receipt(&source, &item, &digest, &data, size)?;
+        Ok((data, added))
+    })();
+    let (data, added) = match filed {
+        Ok(result) => result,
+        Err(error) => {
+            archive.db.execute("INSERT OR REPLACE INTO phone_local_retries(inbox_id,source,family,priority,retry_at,error)
+                VALUES(?,?,?,?,unixepoch()+60,?)", params![id,source,family,priority,format!("{entry}：{error}")])?;
+            return Ok(Some(Filed::Deferred));
+        }
     };
-    let added = archive.file_receipt(&source, &item, &digest, &data, size)?;
     let tx = archive.db.unchecked_transaction()?;
     tx.execute(
         "UPDATE phone_runs SET filed=filed+?,duplicates=duplicates+?
@@ -541,7 +623,7 @@ pub(super) fn file_next(archive: &mut Archive) -> Result<Option<bool>> {
     tx.commit()?;
     if let Some(blob) = &location.blob
         && !archive.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM phone_inbox WHERE blob=?)",
+            "SELECT EXISTS(SELECT 1 FROM phone_inbox WHERE blob=?1 UNION ALL SELECT 1 FROM phone_preserved_blobs WHERE blob=?1)",
             [blob],
             |r| r.get::<_, bool>(0),
         )?
@@ -549,5 +631,5 @@ pub(super) fn file_next(archive: &mut Archive) -> Result<Option<bool>> {
         fs::remove_file(&data)?;
         archive.db.execute("DELETE FROM phone_local_proofs WHERE path=?", [data.strip_prefix(&archive.root)?.to_string_lossy()])?;
     }
-    Ok(Some(added))
+    Ok(Some(Filed::Original(added)))
 }

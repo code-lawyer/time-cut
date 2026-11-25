@@ -540,13 +540,7 @@ async function clickIndexFaces() {
   isIndexing.value = true;
   indexError.value = '';
   try {
-    // Get cluster threshold from array using index
-    const face = config.settings.face;
-    const thresholdIndex = face?.clusterThresholdIndex ?? 2; // Default: Medium (index 2)
-    // Use getter for thresholds to ensure we get the latest values, even if state is old
-    const thresholds = config.faceClusterThresholds ?? [0.35, 0.45, 0.55, 0.65];
-    const clusterEpsilon = thresholds[thresholdIndex] ?? 0.55;
-    await indexFaces(clusterEpsilon);
+    await indexFaces(config.faceClusterEpsilon);
   } catch (e) {
     indexError.value = String(e);
     isIndexing.value = false;

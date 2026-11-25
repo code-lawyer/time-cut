@@ -244,6 +244,9 @@ export const useConfigStore = defineStore('configStore', {
     // Cluster threshold values: cosine distance (lower = stricter, higher = looser)
     // [Very High, High, Medium, Low]
     faceClusterThresholds: () => [0.35, 0.45, 0.55, 0.65],
+    faceClusterEpsilon() {
+      return this.faceClusterThresholds[this.settings.face?.clusterThresholdIndex] ?? this.faceClusterThresholds[2];
+    },
 
   },
 

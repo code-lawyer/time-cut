@@ -73,6 +73,14 @@ jobs:
         run: |
           cargo test --locked --release --manifest-path src-tauri/Cargo.toml
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $artifacts = cargo test --locked --release --manifest-path src-tauri/Cargo.toml --no-run --message-format=json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $tests = @($artifacts | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object {
+            $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.target.name -eq 'Lap' -and $_.executable
+          })
+          if ($tests.Count -ne 1) { throw 'Expected the native Lap test executable.' }
+          python scripts/test_timecut_compat.py $tests[0].executable
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo build --locked --release --manifest-path src-tauri/Cargo.toml
       - name: Validate portable ZIP
         env:

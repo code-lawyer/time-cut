@@ -7,6 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter};
+#[cfg(windows)]
+use tauri::Manager;
 
 // Skip unchanged inventories in the idle worker. Newly received content, a new
 // complete list, and an explicit retry each trigger another local check.
@@ -21,6 +23,11 @@ impl CheckedLists {
         self.stamps.clear();
         self.retry_after.clear();
     }
+}
+
+fn current_album_report(view: &View, destination: &Target, open_capture: bool) -> bool {
+    !open_capture && view.target.as_ref().is_some_and(|active|
+        active.library == destination.library && active.album == destination.album)
 }
 
 fn reconcile_saved_lists(
@@ -160,6 +167,21 @@ fn process_album(
         if remaining==0 && open {return Ok(());}
         if remaining>0 && !inbox::has_due_filing(&probe)? {return Ok(());}
         drop(probe);
+        let publish = |report: &Report, busy: bool| {
+            let mut live = view.lock().unwrap();
+            if current_album_report(&live, &dest, open) {
+                #[cfg(windows)]
+                if let Some(tray) = app.tray_by_id("timecut") {
+                    if report.local_errors > 0 && (live.report.local_errors == 0 || live.report.safe_at != report.safe_at) {
+                        let _ = tray.set_tooltip(Some("Time-cut · 本地收件待修复"));
+                    } else if live.report.local_errors > 0 && report.local_errors == 0 {
+                        let _ = tray.set_tooltip(Some("Time-cut"));
+                    }
+                }
+                live.busy = busy;
+                live.report = report.clone();
+            }
+        };
         let raw=control.query_row("SELECT data FROM history WHERE json_extract(data,'$.safe_at')=? ORDER BY id DESC LIMIT 1",
             [safe_at],|r|r.get::<_,String>(0)).optional()?;
         let mut report=if let Some(raw)=raw {serde_json::from_str(&raw)?} else {
@@ -174,7 +196,8 @@ fn process_album(
             let mut archive={let _guard=guard()?;Archive::open(Path::new(&dest.root))?};
             {let _guard=guard()?;inbox::recover(&archive)?;archive.reconcile()?;}
             (report.local_errors,report.local_error) = inbox::local_errors(&archive.db)?;
-            {let mut live=view.lock().unwrap();live.busy=true;report.phase="正在本地整理".into();live.report=report.clone();}
+            report.phase="正在本地整理".into();
+            publish(&report, true);
             let mut last=Instant::now();
             let pass_started=chrono::Utc::now().timestamp();
             loop {
@@ -183,7 +206,7 @@ fn process_album(
                 let inbox::Filed::Original(added) = outcome else {
                     if report.local_errors == 0 {
                         (report.local_errors,report.local_error) = inbox::local_errors(&archive.db)?;
-                        view.lock().unwrap().report=report.clone();
+                        publish(&report, true);
                     }
                     continue;
                 };
@@ -191,7 +214,7 @@ fn process_album(
                 report.local_duplicates+=u64::from(!added);
                 report.local_pending=report.local_pending.saturating_sub(1);
                 if last.elapsed()>=Duration::from_millis(200) {
-                    view.lock().unwrap().report=report.clone();
+                    publish(&report, true);
                     last=Instant::now();
                 }
             }
@@ -215,8 +238,29 @@ fn process_album(
             tx.execute("INSERT INTO history(data) VALUES(?)",[raw])?;
         }
         tx.commit()?;
-        {let mut live=view.lock().unwrap();live.busy=false;live.report=report;live.recent=recent(control)?;}
+        publish(&report, false);
+        view.lock().unwrap().recent=recent(control)?;
         if needs_index {let _=app.emit("timecut-index",());}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_previous_release_can_only_update_its_selected_album_without_an_open_capture() {
+        let dest = Target { library: "catalog".into(), album: 7, ..Default::default() };
+        let mut view = View::default();
+        assert!(!current_album_report(&view, &dest, false));
+        view.target = Some(dest.clone());
+        assert!(current_album_report(&view, &dest, false));
+        assert!(!current_album_report(&view, &dest, true));
+        view.target.as_mut().unwrap().album = 8;
+        assert!(!current_album_report(&view, &dest, false));
+        view.target.as_mut().unwrap().album = 7;
+        view.target.as_mut().unwrap().library = "other".into();
+        assert!(!current_album_report(&view, &dest, false));
+    }
 }

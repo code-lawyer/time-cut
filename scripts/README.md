@@ -62,10 +62,9 @@ The Windows PowerShell downloader pins GitHub asset IDs and verifies SHA-256 for
 
 ## Downloader integrity regression tests
 
-Run `python -m unittest discover` from the repository root to discover the downloader suite. For verbose downloader-only output, use `python -m unittest discover -s scripts/tests -v`.
-These tests execute the actual Bash downloaders in temporary layouts, replacing only the network transport to exercise corrupt caches, corrupt successful responses, and failed transfers. Real upstream clean-download/cache smoke evidence is recorded in the Phase 1 verification artifact under `.context/`.
+Run `python -m unittest discover -s scripts/tests -v` from the repository root. The tests execute the Bash downloaders in temporary directories and replace the network transport to exercise corrupt caches, corrupt successful responses and failed transfers. On Windows they also exercise the PowerShell sidecar downloader and check that rebuilding a portable ZIP excludes stale files.
 
-`.github/workflows/test-downloaders.yml` runs Bash syntax checks and the downloader-only suite on Linux and macOS for pull requests and `main` pushes that change `scripts/**` or that workflow. It also supports manual dispatch. The suite uses no upstream downloads or build secrets.
+`.github/workflows/test-downloaders.yml` runs on Windows, Linux and macOS for pull requests and `main` pushes that change `scripts/**` or the workflow. It also supports manual dispatch.
 
 ## Native media compatibility tests
 

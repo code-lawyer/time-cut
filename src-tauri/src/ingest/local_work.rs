@@ -7,8 +7,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter};
-#[cfg(windows)]
-use tauri::Manager;
 
 // Skip unchanged inventories in the idle worker. Newly received content, a new
 // complete list, and an explicit retry each trigger another local check.

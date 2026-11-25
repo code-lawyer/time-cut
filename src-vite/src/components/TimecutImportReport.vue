@@ -7,7 +7,7 @@
     <p class="report-path" :title="current.source" dir="auto">{{ current.source }}</p>
     <p v-if="current.local_errors" class="issue-list" role="status">{{ t('timecut.localRepairCount', { count: n(current.local_errors) }) }} {{ current.local_error }}</p>
     <p v-else-if="current.safe_at" class="safe-note" role="status" data-testid="originals-safe">
-      {{ t('timecut.safeToUnplug') }} · {{ safeTime }}
+      {{ t(liveRelease ? 'timecut.safeToUnplug' : 'timecut.receiptComplete') }} · {{ safeTime }}
       <span v-if="receiveDuration"> · {{ t('timecut.receiveDuration', { duration: receiveDuration }) }}</span>
     </p>
     <p v-if="current.capture && !current.safe_at" class="scan-counts">{{ t('timecut.cableHint') }}</p>
@@ -85,12 +85,12 @@ import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { formatDuration, formatFileSize } from '@/common/utils';
 
-const props = defineProps({ current: { type: Object, required: true }, busy: Boolean, recent: { type: Array, required: true }, retryAt: Number });
+const props = defineProps({ current: { type: Object, required: true }, busy: Boolean, recent: { type: Array, required: true }, retryAt: Number, liveRelease: Boolean });
 const { t, n, locale } = useI18n();
 const retryTime = computed(() => props.retryAt && new Date(props.retryAt * 1000).toLocaleTimeString(locale.value));
 const counters = ['added', 'skipped', 'failed'];
 const counterLabel = key => props.current.capture ? ({ added: 'received', skipped: 'alreadySaved' }[key] ?? key) : key;
-const safeTime = computed(() => new Date(props.current.safe_at).toLocaleTimeString(locale.value));
+const safeTime = computed(() => new Date(props.current.safe_at).toLocaleString(locale.value));
 const receiveDuration = computed(() => {
   const { capture_started_at: start, safe_at: end } = props.current;
   return Number.isSafeInteger(start) && Number.isSafeInteger(end) && end >= start
@@ -100,7 +100,7 @@ const phases = {
   '正在盘点手机清单': 'listingPhone', '复核手机素材清单': 'confirmPhone',
   '核对手机旧版本': 'comparingSource', '确认手机返回的原件': 'confirmingStream',
   '核对手机目录': 'checkPhoneFolders', '核对本地收件': 'checkReceipts',
-  '接收手机原件': 'receiving', '原件已收齐，可以拔线': 'safeToUnplug',
+  '接收手机原件': 'receiving', '原件已收齐，可以拔线': 'receiptComplete',
   '正在本地整理': 'localFiling', '本地原件整理完成': 'localFiled',
   '已核对本机接收记录': 'localProofsChecked',
   '检查图库': 'checking', '正在读取': 'reading', '部分未完成': 'partial',

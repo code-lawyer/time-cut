@@ -15,7 +15,7 @@
       </header>
 
       <div class="import-scroll">
-        <ImportReport v-if="current && state.busy" :current="current" busy :recent="state.recent" />
+        <ImportReport v-if="current && state.busy" :current="current" busy :recent="state.recent" :live-release="liveRelease" />
         <section class="import-section" aria-labelledby="timecut-destination">
           <h2 id="timecut-destination">{{ t('timecut.destination') }}</h2>
           <form v-if="editingRoot || !state.target" class="section-form" @submit.prevent="saveTarget">
@@ -80,7 +80,7 @@
           <p v-if="feedback?.at === 'folder'" :role="feedback.error ? 'alert' : 'status'" :class="['feedback', { problem: feedback.error }]">{{ feedback.text }}</p>
         </section>
 
-        <ImportReport v-if="current && !state.busy" :current="current" :recent="state.recent"
+        <ImportReport v-if="current && !state.busy" :current="current" :recent="state.recent" :live-release="liveRelease"
           :retry-at="state.target?.auto ? (state.apple_retry_at ?? state.next_retry_at) : null" />
         <p v-if="serviceError" class="feedback problem service-error" role="alert">{{ serviceError }}</p>
       </div>
@@ -92,6 +92,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { IconClose, IconFolder, IconRefresh, IconUpload } from '@/common/icons';
 import { openFolderDialog } from '@/common/utils';
 import { useTimecutIndex } from '@/composables/useTimecutIndex';
@@ -106,11 +107,19 @@ const opened = ref(false), editingRoot = ref(false), pending = ref('');
 const feedback = ref(null), statusError = ref(''), indexError = ref('');
 const serviceError = computed(() => statusError.value || indexError.value);
 const opener = ref(null), dialog = ref(null);
-const current = computed(() => state.value.report?.phase ? state.value.report : state.value.recent[0]);
+const recentRelease = ref(null);
+const current = computed(() => state.value.report?.phase ? state.value.report : state.value.busy ? null : state.value.recent[0]);
+const liveRelease = computed(() => {
+  const report = state.value.report, release = recentRelease.value, target = state.value.target;
+  return !!release && !report.local_errors && report.safe_at === release.safe_at && report.device_key === release.device_key
+    && report.source === release.source && target?.library === release.library && target?.album === release.album
+    && target?.root === release.root && state.value.devices.length === 1 && state.value.devices[0] === report.source;
+});
 const importLabel = computed(() => {
-  if (current.value?.local_errors) return t('timecut.localRepair');
-  if (current.value?.safe_at) return t('timecut.safeToUnplug');
+  if (state.value.report.local_errors) return t('timecut.localRepair');
+  if (liveRelease.value) return t('timecut.safeToUnplug');
   if (!state.value.busy) return t('timecut.title');
+  if (state.value.report.phase === '正在本地整理') return t('timecut.localFiling');
   const report = state.value.report;
   const completed = (report.added ?? 0) + (report.skipped ?? 0);
   if (completed) return t('timecut.importingCount', { count: n(completed) });
@@ -127,7 +136,7 @@ const deviceText = computed(() => {
   return state.value.target ? t('timecut.waiting') : t('timecut.afterSave');
 });
 
-let first = true, disposed = false, timer, statusRequest;
+let first = true, disposed = false, timer, statusRequest, releaseTimer, unlistenRelease;
 useTimecutIndex(error => { indexError.value = error == null ? '' : String(error); });
 
 function close() {
@@ -158,6 +167,8 @@ async function readStatus() {
   statusRequest = invoke('timecut_status').then(next => {
     if (disposed) return;
     const old = state.value.target;
+    if (recentRelease.value && (next.target?.library !== old?.library || next.target?.album !== old?.album
+      || next.target?.root !== old?.root || !next.devices.includes(recentRelease.value.source))) recentRelease.value = null;
     state.value = next;
     if (first) {
       root.value = next.target?.root || '';
@@ -180,8 +191,29 @@ async function poll() {
   if (!disposed) timer = setTimeout(poll, state.value.busy ? 500 : opened.value || state.value.target?.auto ? 1500 : 8000);
 }
 watch(opened, value => { if (value) void readStatus(); });
-onMounted(poll);
-onUnmounted(() => { disposed = true; clearTimeout(timer); uiStore.removeInputHandler('TimecutImport'); });
+onMounted(async () => {
+  void poll();
+  try {
+    const remove = await listen('timecut-originals-safe', ({ payload }) => {
+      const target = state.value.target;
+      if (disposed || !target || !payload?.safe_at || !payload.device_key) return;
+      recentRelease.value = { safe_at: payload.safe_at, source: payload.source, device_key: payload.device_key,
+        library: target.library, album: target.album, root: target.root };
+      clearTimeout(releaseTimer);
+      releaseTimer = setTimeout(() => { recentRelease.value = null; }, 10_000);
+      void readStatus();
+    });
+    if (disposed) remove();
+    else unlistenRelease = remove;
+  } catch (error) { if (!disposed) statusError.value = String(error); }
+});
+onUnmounted(() => {
+  disposed = true;
+  clearTimeout(timer);
+  clearTimeout(releaseTimer);
+  unlistenRelease?.();
+  uiStore.removeInputHandler('TimecutImport');
+});
 
 async function action(at, operation, success) {
   if (pending.value) return false;

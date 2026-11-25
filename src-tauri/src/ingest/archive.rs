@@ -81,6 +81,13 @@ pub trait Source {
     /// Identifies the directory policy behind persisted phone inventories.
     fn album_scope_version(&self) -> Option<&'static str> { None }
     fn album_path_in_scope(&self, _relative: &Path) -> bool { true }
+    /// Subtrees explicitly excluded by a source marker during the last complete walk.
+    fn excluded_album_folders(&self) -> std::collections::HashSet<PathBuf> {
+        Default::default()
+    }
+    fn uses_album_markers(&self) -> bool {
+        false
+    }
     /// Hardware serial read from the paired Apple session that owns this DCIM source.
     fn paired_camera_serial(&self) -> Option<&str> { None }
     fn is_phone(&self) -> bool {

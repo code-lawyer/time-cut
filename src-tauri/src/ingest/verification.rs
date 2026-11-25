@@ -90,6 +90,11 @@ pub(super) fn capture_minimum(db: &Connection, dest: &Target, key: &str, scope: 
         params![dest.library, dest.album, key], |r| r.get(0),
     ).optional()?;
     let Some(requested) = requested else { return Ok(0); };
+    // Scoped runs maintain their floor in the archive. An older report can count
+    // a directory that Android has since hidden, while the explicit request still applies.
+    if scope.is_some() {
+        return Ok(requested);
+    }
     // Earlier builds kept the highest device count only in the 40-entry history.
     // An incomplete or empty session can report the old floor without rediscovering it.
     let observed: Option<u64> = db.query_row(

@@ -482,9 +482,11 @@
               <div class="text-[12px] text-base-content/70 wrap-break-word py-1">{{ row.value }}</div>
             </template>
             <template v-if="fieldVisible('location.map') && hasCoordinates">
-              <div class="col-span-2 h-75 rounded-box overflow-hidden relative z-0 border border-base-content/5">
-                <MapView :lat="Number(fileInfo.gps_latitude)" :lon="Number(fileInfo.gps_longitude)" :label="fileInfo.geo_name || fileInfo.name || 'Lap'" />
+              <div v-if="onlineMapOpen" class="col-span-2 h-75 rounded-box overflow-hidden relative z-0 border border-base-content/5">
+                <MapView :lat="Number(fileInfo.gps_latitude)" :lon="Number(fileInfo.gps_longitude)" :label="fileInfo.geo_name || fileInfo.name" />
               </div>
+              <button v-else type="button" class="btn btn-sm btn-outline col-span-2 justify-self-start"
+                @click="onlineMapOpen = true">{{ $t('file_info.load_online_map') }}</button>
             </template>
             <template v-else-if="displayField('location.map', '')">
               <div class="flex items-center text-[11px] text-base-content/30 h-6">{{ $t('file_info.map') }}</div>
@@ -914,6 +916,9 @@ const hasSourceMetadata = computed(() => sourceDetailRows.value.length > 0 || (!
 const showBasicInfoPanel = computed(() => config.infoPanel.showBasicInfo);
 const showMetadataPanel = computed(() => config.infoPanel.showMetadata);
 const showMapPanel = computed(() => config.infoPanel.showMap);
+const onlineMapOpen = ref(false);
+watch([activeInfoKey, () => props.fileInfo?.gps_latitude, () => props.fileInfo?.gps_longitude, showMapPanel],
+  () => { onlineMapOpen.value = false; });
 watch(() => [libConfig._libraryId, props.fileInfo?.id, props.fileInfo?.file_path, props.fileInfo?.last_scan_time, props.fileInfo?.modified_at, skipDetailReads.value], (values, previous) => {
   const sameFile = previous && values[0] === previous[0] && values[1] === previous[1];
   if (sameFile) {

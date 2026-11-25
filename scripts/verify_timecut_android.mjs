@@ -12,7 +12,7 @@ const hasTable = (db, name) => Boolean(db.prepare(
 const normalized = value => process.platform === 'win32'
   ? path.toNamespacedPath(path.resolve(value)).toLowerCase() : path.resolve(value);
 const attachment = name => path.extname(name).toLowerCase().match(/^\.(aae|xmp)$/)?.[1];
-export const galleryScope = 'android-albums-v1';
+export const galleryScope = 'android-albums-v2';
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 
 // The first status after opening a resumed app can still show the old, wider inventory.
@@ -35,6 +35,7 @@ export function loadGallerySnapshot(filename) {
   const s = JSON.parse(fs.readFileSync(filename, 'utf8'));
   assert.equal(s.format, 'timecut-shell-gallery-path-size-sha256-v1');
   assert.deepEqual(s.galleryRoots, ['DCIM', 'Pictures', 'Movies']);
+  assert.equal(s.honorNoMedia, true, 'The independent inventory must honor visible .nomedia markers');
   assert.ok(s.rootFolders > 0 && Number.isSafeInteger(s.entries) && s.entries > 0 &&
     Number.isSafeInteger(s.knownBytes) && s.knownBytes >= 0 &&
     Array.isArray(s.tokens) && s.tokens.length === s.entries, 'Invalid independent gallery inventory');

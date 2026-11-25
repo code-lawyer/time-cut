@@ -4,13 +4,49 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { createI18n } from 'vue-i18n';
 import { defineStore, createPinia, setActivePinia } from 'pinia';
-import { ref, watch, nextTick } from 'vue';
+import { computed, ref, watch, nextTick } from 'vue';
 import ts from 'typescript';
 
 const source = await readFile(new URL('../src/common/i18n.js', import.meta.url), 'utf8');
 const fieldSource = await readFile(new URL('../src/common/fileInfoFields.ts', import.meta.url), 'utf8');
 const { defaultFileInfoFields } = await import(`data:text/javascript;base64,${Buffer.from(ts.transpile(fieldSource, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext })).toString('base64')}`);
 const storeSource = await readFile(new URL('../src/stores/configStore.js', import.meta.url), 'utf8');
+
+test('portable builds stay offline and configured release notes use the Time-cut tag and storage keys', async () => {
+  const updater = await readFile(new URL('../src/common/updater.ts', import.meta.url), 'utf8');
+  const code = ts.transpile(updater, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext });
+  const version = '0.1.0-preview.39';
+  const stored = new Map([['lap_update_release_note_version', '0.4.1'], ['lap_last_update_check', String(Date.now())]]);
+  const opened = [], checks = [];
+  async function instance(enabled) {
+    const context = vm.createContext({ window: { setTimeout, clearTimeout }, localStorage: {
+      getItem: key => stored.get(key) ?? null, removeItem: key => stored.delete(key), setItem: (key, value) => stored.set(key, value),
+    } });
+    const imports = { vue: { ref, computed }, '@tauri-apps/plugin-updater': { check: async () => { checks.push(true); return null; } },
+      '@tauri-apps/plugin-process': { relaunch() {} }, '@/common/api': { openExternalUrl: url => opened.push(url) },
+      '@/common/toast': { useToast: () => ({}) }, '@/common/i18n': { i18n: {} } };
+    const module = new vm.SourceTextModule(code, { context, initializeImportMeta(meta) {
+      meta.env = { VITE_TIMECUT_UPDATER: enabled ? '1' : '0', VITE_TIMECUT_REPOSITORY_URL: 'https://example.test/timecut/' };
+    } });
+    await module.link(name => new vm.SyntheticModule(Object.keys(imports[name]), function () {
+      for (const [key, value] of Object.entries(imports[name])) this.setExport(key, value);
+    }, { context }));
+    await module.evaluate();
+    return module.namespace.useAppUpdater(ref({}), { silent: true });
+  }
+  const portable = await instance(false);
+  await portable.checkForUpdates(true);
+  assert.equal(checks.length, 0);
+  const configured = await instance(true);
+  assert.equal(configured.isReleaseNoteVisible.value, false);
+  await configured.checkForUpdates(false);
+  assert.equal(checks.length, 1);
+  stored.set('timecut_update_release_note_version', version);
+  const updated = await instance(true);
+  await updated.handleUpdateAction();
+  assert.deepEqual(opened, ['https://example.test/timecut/releases/tag/timecut-v' + version]);
+  assert.equal(stored.has('timecut_update_release_note_version'), false);
+});
 
 async function fixture(customLoaders = {}) {
   const calls = [];

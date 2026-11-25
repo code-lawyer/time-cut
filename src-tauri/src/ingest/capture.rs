@@ -50,8 +50,21 @@ fn flush_discoveries(db: &Connection, queue: &mut PhoneQueue, items: &mut Vec<It
     Ok(())
 }
 
-fn save_progress(db: &Connection, run: i64, report: &Report) -> Result<()> {
-    db.execute(
+fn save_progress(
+    db: &Connection,
+    run: i64,
+    report: &Report,
+    counts: Option<&HashMap<PathBuf, u64>>,
+) -> Result<()> {
+    let tx = db.unchecked_transaction()?;
+    if let Some(counts) = counts {
+        tx.execute(
+            "INSERT OR REPLACE INTO phone_peak_folders SELECT id,?1 FROM phone_runs
+            WHERE id=?2 AND peak<?3",
+            params![serde_json::to_string(counts)?, run, report.discovered],
+        )?;
+    }
+    tx.execute(
         "UPDATE phone_runs SET scanned=?,covered=?,peak=MAX(peak,?),progress_at=? WHERE id=?",
         params![
             report.scanned,
@@ -61,6 +74,7 @@ fn save_progress(db: &Connection, run: i64, report: &Report) -> Result<()> {
             run
         ],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -206,7 +220,7 @@ pub(super) fn receive<Guard>(
             params![key,scope],
             |r| r.get(0),
         )?;
-        let minimum = if previously_complete {
+        let requested_minimum = if previously_complete {
             0
         } else {
             minimum((report.device_key.as_deref().unwrap(), scope))?
@@ -232,7 +246,7 @@ pub(super) fn receive<Guard>(
                 ))
             },
         )?;
-        let minimum = minimum.max(peak);
+        let minimum = requested_minimum.max(peak);
         db.execute(
             "UPDATE phone_runs SET sessions=sessions+1 WHERE id=?",
             [run],
@@ -310,7 +324,7 @@ pub(super) fn receive<Guard>(
             order.interrupted.remove(&item.path);
         }
         update_folder_coverage(root, &folder_coverage, &mut report);
-        let minimum = minimum.max(report.list_total.unwrap_or(0));
+        let mut minimum = minimum.max(report.list_total.unwrap_or(0));
         report.expected_minimum = (minimum > 0).then_some(minimum);
         report.phase = "正在盘点手机清单".into();
         let mut members: Vec<inventory::Member> = Vec::new();
@@ -319,6 +333,8 @@ pub(super) fn receive<Guard>(
         let mut folder_start = 0;
         let mut recovering_folder = None;
         let mut listing_error = false;
+        let mut counted_folder = PathBuf::new();
+        let mut scope_counts = source.uses_album_markers().then(HashMap::new);
         let mut last = Instant::now();
         let mut last_checkpoint = Instant::now();
         let mut publish = |p: &Report, force: bool| {
@@ -348,8 +364,11 @@ pub(super) fn receive<Guard>(
                 ScanEvent::Inspected { media } => {
                     report.scanned += 1;
                     report.discovered += u64::from(media);
+                    if media && let Some(counts) = &mut scope_counts {
+                        *counts.entry(counted_folder.clone()).or_insert(0) += 1;
+                    }
                     if last_checkpoint.elapsed() >= Duration::from_secs(5) {
-                        save_progress(db, run, &report)?;
+                        save_progress(db, run, &report, scope_counts.as_ref())?;
                         last_checkpoint = Instant::now();
                     }
                 }
@@ -359,6 +378,7 @@ pub(super) fn receive<Guard>(
                         params![run,path.to_string_lossy()])? as u64;
                 }
                 ScanEvent::DirectoryStart(path) => {
+                    counted_folder.clone_from(&path);
                     folder_start=members.len();
                     recovering_folder = folder_pass.interrupted.contains(&path).then(|| path.clone());
                     db.execute("INSERT INTO phone_list_folders(run_id,path,attempted,probing) VALUES(?,?,?,1)
@@ -509,9 +529,23 @@ pub(super) fn receive<Guard>(
         });
         flush_discoveries(db, &mut queue, &mut discoveries)?;
         report.pending = queue.count();
-        save_progress(db, run, &report)?;
+        save_progress(db, run, &report, scope_counts.as_ref())?;
         scanned?;
         active()?;
+        let excluded = source.excluded_album_folders();
+        if !listing_error && !excluded.is_empty() && let Some(counts) = &scope_counts {
+            let _guard = destination()?;
+            let retained = inventory::withhold_folders(
+                db, run, key, &excluded, counts, &mut queue, &mut report,
+            )?;
+            let visible = |path: &Path| !excluded.iter().any(|dir| path.starts_with(dir));
+            outstanding_folders.retain(|dir| visible(dir));
+            folder_coverage.retain(|dir, _| visible(dir));
+            update_folder_coverage(root, &folder_coverage, &mut report);
+            minimum = requested_minimum.max(retained);
+            report.expected_minimum = (minimum > 0).then_some(minimum);
+            report.pending = queue.count();
+        }
         let ids: HashSet<&str> = members.iter().map(|m| m.item.id.as_str()).collect();
         if ids.len() != members.len() {
             return Err("手机目录包含重复的设备标识，将重新盘点".into());
@@ -584,13 +618,13 @@ pub(super) fn receive<Guard>(
                 }
             }
             if response.is_err() || last_checkpoint.elapsed() >= Duration::from_secs(5) {
-                save_progress(db, run, &report)?;
+                save_progress(db, run, &report, scope_counts.as_ref())?;
                 last_checkpoint = Instant::now();
             }
             member.receipt = response?;
         }
         inventory::checkpoint(db, run, &mut changes)?;
-        save_progress(db, run, &report)?;
+        save_progress(db, run, &report, scope_counts.as_ref())?;
         if report.failed > 0
             || report.discovered == 0
             || !complete_list
@@ -663,6 +697,7 @@ pub(super) fn receive<Guard>(
         }
         let safe_at = chrono::Utc::now().timestamp_millis();
         tx.execute("DELETE FROM phone_item_retries WHERE run_id=?", [run])?;
+        tx.execute("DELETE FROM phone_peak_folders WHERE run_id=?", [run])?;
         inbox::release(&tx, run, key, scope.is_some())?;
         tx.execute(
             "UPDATE phone_runs SET safe_at=?,discovered=?,inventory=? WHERE id=?",

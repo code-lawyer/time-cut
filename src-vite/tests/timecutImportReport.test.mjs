@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
 import { createServer } from 'vite';
-import { createSSRApp, h } from 'vue';
+import { computed, createSSRApp, h, ref } from 'vue';
 import { createI18n } from 'vue-i18n';
 import { renderToString } from 'vue/server-renderer';
 
@@ -24,9 +24,9 @@ before(async () => {
 });
 after(async () => { await server?.close(); });
 
-async function render(state, busy = false) {
+async function render(state, busy = false, liveRelease = false) {
   const current = { capture: true, phase: '接收手机原件', capture_started_at: started, source: 'iPhone', ...state };
-  const app = createSSRApp({ render: () => h(Report, { current, busy, recent: [] }) });
+  const app = createSSRApp({ render: () => h(Report, { current, busy, recent: [], liveRelease }) });
   app.use(createI18n({ legacy: false, locale: 'zh-CN', messages }));
   return renderToString(app);
 }
@@ -78,13 +78,42 @@ test('a JPEG export candidate stays pending in the full source count', async () 
   assert.doesNotMatch(html, /data-testid="originals-safe"/);
 });
 
-test('only a recorded release displays the cable notice and measured duration', async () => {
-  const old = await render({ capture_started_at: null, safe_at: started });
+test('a saved receipt shows the date and duration, and only a live release permits unplugging', async () => {
+  const old = await render({ phase: '原件已收齐，可以拔线', capture_started_at: null, safe_at: started });
   assert.match(old, /data-testid="originals-safe"/);
-  assert.doesNotMatch(old, /本轮接收用时/);
-  const released = await render({ safe_at: started + 7_215_871 });
+  assert.ok(old.includes(new Date(started).toLocaleString('zh-CN')));
+  assert.match(old, /本次导入的相册原件已收齐/);
+  assert.doesNotMatch(old, /本轮接收用时|可以拔线/);
+  const released = await render({ safe_at: started + 7_215_871 }, false, true);
   assert.match(released, /相册原件已收齐，可以拔线/);
   assert.match(released, /本轮接收用时 2:00:15/);
+});
+
+test('the import entry scopes the cable notice to the matching live release', () => {
+  const source = fs.readFileSync(new URL('../src/components/TimecutImport.vue', import.meta.url), 'utf8');
+  const setup = source.slice(source.indexOf('const recentRelease ='), source.indexOf('const unsavedDestination'));
+  const state = ref({ report: {}, recent: [{ safe_at: started }], devices: ['Phone'], busy: false,
+    target: { album: 1, root: 'archive', library: 'test' } });
+  const { recentRelease, liveRelease, importLabel } = new Function('ref', 'computed', 'state', 't', 'n',
+    setup + '\nreturn { recentRelease, liveRelease, importLabel };')(ref, computed, state, key => key, String);
+  assert.equal(importLabel.value, 'timecut.title');
+  const receipt = { source: 'Phone', device_key: 'usb-id', safe_at: started, phase: '原件已收齐，可以拔线' };
+  state.value.report = receipt;
+  assert.equal(liveRelease.value, false);
+  recentRelease.value = { ...receipt, ...state.value.target };
+  assert.equal(importLabel.value, 'timecut.safeToUnplug');
+  for (const change of [{ safe_at: started + 1 }, { device_key: 'other' }, { local_errors: 1 }]) {
+    state.value.report = { ...receipt, ...change };
+    assert.equal(liveRelease.value, false);
+  }
+  state.value.report = receipt;
+  for (const devices of [[], ['Other'], ['Phone', 'Phone']]) {
+    state.value.devices = devices;
+    assert.equal(liveRelease.value, false);
+  }
+  state.value.devices = ['Phone'];
+  state.value.target.album++;
+  assert.equal(liveRelease.value, false);
 });
 
 test('JPEG export storage limits show required and available space and keep originals pending', async () => {

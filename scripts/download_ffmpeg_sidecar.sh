@@ -56,11 +56,7 @@ case "$OS_TYPE" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT|windows|windows-*)
     case "$ARCH_TYPE" in
       x86_64|x64|AMD64)
-        TRIPLE=x86_64
-        FFMPEG_ASSET=405019646
-        FFPROBE_ASSET=405019652
-        FFMPEG_SHA256=1a65d5b0b10d8d9a81d2824a3538046a40ed3607c906b335a166add87613f705
-        FFPROBE_SHA256=54b944d6095c4588d7548424d7acd5118390a9d4f01b1c92f841547fc9a7429c ;;
+        exec python3 "$SCRIPT_DIR/fetch_timecut_ffmpeg.py" "$TARGET_DIR" ;;
       aarch64|arm64|ARM64)
         TRIPLE=aarch64
         FFMPEG_ASSET=405019640

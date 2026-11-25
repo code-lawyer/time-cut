@@ -122,6 +122,36 @@ impl PhoneQueue {
         self.pending.len() as u64
     }
 
+    pub fn withhold_folders(
+        &mut self,
+        db: &Connection,
+        folders: &HashSet<std::path::PathBuf>,
+    ) -> Result<()> {
+        let mut delete = db.prepare_cached(
+            "DELETE FROM phone_pending WHERE source=? AND entry=?
+            AND signature=? AND occurrence=?",
+        )?;
+        for entry in &self.pending {
+            if folders
+                .iter()
+                .any(|dir| std::path::Path::new(&entry.path).starts_with(dir))
+            {
+                delete.execute(params![
+                    self.source,
+                    entry.path,
+                    entry.signature,
+                    entry.occurrence
+                ])?;
+            }
+        }
+        self.pending.retain(|entry| {
+            !folders
+                .iter()
+                .any(|dir| std::path::Path::new(&entry.path).starts_with(dir))
+        });
+        Ok(())
+    }
+
     pub fn unlisted_pending(&self) -> u64 {
         self.pending.iter().filter(|e| self.occurrences.get(&(e.path.clone(),e.signature.clone()))
             .copied().unwrap_or(0) < e.occurrence).count() as u64

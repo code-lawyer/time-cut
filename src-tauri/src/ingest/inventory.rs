@@ -17,6 +17,7 @@ use std::{
 pub(super) fn initialize(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS phone_run_scopes(run_id INTEGER PRIMARY KEY,scope TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS phone_peak_folders(run_id INTEGER PRIMARY KEY,counts TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS phone_lists(
         run_id INTEGER PRIMARY KEY, checked_at INTEGER NOT NULL, total INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS phone_list_items(
@@ -69,7 +70,7 @@ pub(super) fn apply_album_scope(db: &Connection, run: i64, source: &dyn Source, 
             if !source.album_path_in_scope(Path::new(&entry)) { delete.execute(params![key, entry])?; }
         }
     }
-    for table in ["phone_list_items", "phone_lists", "phone_list_folders", "phone_folder_items",
+    for table in ["phone_list_items", "phone_lists", "phone_list_folders", "phone_folder_items", "phone_peak_folders",
         "phone_item_retries", "phone_usb_original_listings", "phone_returned_data"] {
         tx.execute(&format!("DELETE FROM {table} WHERE run_id=?"), [run])?;
     }
@@ -87,6 +88,112 @@ pub(super) struct Member {
     pub priority: u8,
     pub recorded: Option<String>,
     pub attempted: bool,
+}
+
+/// Only a live, rechecked marker can remove a subtree from an open inventory.
+/// Subtract the members previously observed there, retaining the other members'
+/// floor and any unexplained high-water count. Historical manifests and bytes stay intact.
+pub(super) fn withhold_folders(
+    db: &Connection,
+    run: i64,
+    source: &str,
+    hidden: &HashSet<PathBuf>,
+    current: &HashMap<PathBuf, u64>,
+    queue: &mut super::resume::PhoneQueue,
+    report: &mut Report,
+) -> Result<u64> {
+    let tx = db.unchecked_transaction()?;
+    let excludes = |value: &str| hidden.iter().any(|dir| Path::new(value).starts_with(dir));
+    let total = report.list_total.unwrap_or(0);
+    let mut removed_items = 0;
+    let mut retained_list = HashMap::<PathBuf, u64>::new();
+    if total > 0 {
+        let mut q = tx.prepare("SELECT entry FROM phone_list_items WHERE run_id=?")?;
+        for entry in q.query_map([run], |r| r.get::<_, String>(0))? {
+            let entry = entry?;
+            if excludes(&entry) {
+                removed_items += 1;
+            } else if let Some(parent) = Path::new(&entry).parent() {
+                *retained_list.entry(parent.to_owned()).or_default() += 1;
+            }
+        }
+    }
+    let peak: u64 = tx.query_row("SELECT peak FROM phone_runs WHERE id=?", [run], |r| {
+        r.get(0)
+    })?;
+    let snapshot: Option<String> = tx
+        .query_row(
+            "SELECT counts FROM phone_peak_folders WHERE run_id=?",
+            [run],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let mut peak_counts: HashMap<PathBuf, u64> = snapshot
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    let has_peak_evidence = peak_counts.values().sum::<u64>() == peak;
+    peak_counts.retain(|path, _| !hidden.iter().any(|dir| path.starts_with(dir)));
+    let retained_peak = if has_peak_evidence {
+        peak_counts.values().sum()
+    } else {
+        peak
+    };
+    // Match whole components, including names containing SQL wildcards and punctuation.
+    for dir in hidden {
+        let path = dir.to_string_lossy().replace('\\', "/");
+        for (table, key, col) in [
+            ("phone_list_folders", "run_id", "path"),
+            ("phone_folder_items", "run_id", "parent"),
+            ("phone_directories", "source", "path"),
+        ] {
+            let sql = format!(
+                "DELETE FROM {table} WHERE {key}=?1 AND
+                instr(replace({col},char(92),'/')||'/',?2||'/')=1"
+            );
+            if key == "source" {
+                tx.execute(&sql, params![source, path])?;
+            } else {
+                tx.execute(&sql, params![run, path])?;
+            }
+        }
+    }
+    if removed_items > 0 {
+        tx.execute("DELETE FROM phone_list_items WHERE run_id=?", [run])?;
+        tx.execute("DELETE FROM phone_lists WHERE run_id=?", [run])?;
+        report.list_total = None;
+        report.list_at = None;
+        report.list_covered = 0;
+        report.source_mismatches = 0;
+    }
+    let floor = total
+        .saturating_sub(removed_items)
+        .max(retained_peak)
+        .max(report.discovered);
+    tx.execute(
+        "UPDATE phone_runs SET peak=? WHERE id=?",
+        params![floor, run],
+    )?;
+    let evidence = if current.values().sum::<u64>() == floor {
+        current
+    } else if retained_list.values().sum::<u64>() == floor {
+        &retained_list
+    } else {
+        &peak_counts
+    };
+    if evidence.values().sum::<u64>() == floor {
+        tx.execute(
+            "INSERT OR REPLACE INTO phone_peak_folders VALUES(?,?)",
+            params![run, serde_json::to_string(evidence)?],
+        )?;
+    } else {
+        tx.execute("DELETE FROM phone_peak_folders WHERE run_id=?", [run])?;
+    }
+    queue.withhold_folders(&tx, hidden)?;
+    folder_progress(&tx, run, report)?;
+    tx.commit()?;
+    Ok(floor)
 }
 
 impl Member {
@@ -534,6 +641,7 @@ pub(super) fn confirm(
     members: &[Member],
     mut progress: impl FnMut(u64, u64) -> Result<()>,
 ) -> Result<()> {
+    let excluded = source.excluded_album_folders();
     let mut expected: HashMap<&str, &Item> = members
         .iter()
         .map(|m| (m.item.id.as_str(), &m.item))
@@ -567,7 +675,7 @@ pub(super) fn confirm(
         }
         Ok(())
     })?;
-    if !expected.is_empty() {
+    if !expected.is_empty() || source.excluded_album_folders() != excluded {
         return Err("手机复核清单少于接收清单，将重新盘点".into());
     }
     Ok(())

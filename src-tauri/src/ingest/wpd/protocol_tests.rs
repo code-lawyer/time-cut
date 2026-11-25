@@ -93,6 +93,7 @@ enum Kind {
     ReadFaultMetadata,
     Service,
     MissingType,
+    RenameToMarkerAfterRead,
     File(&'static [u8], SizeHint),
 }
 type Row = (String, Kind);
@@ -470,13 +471,15 @@ impl IPortableDeviceProperties_Impl for CameraSession_Impl {
             return Err(ERROR_DEVICE_NOT_CONNECTED.to_hresult().into());
         }
         let vals = values()?;
-        let name = HSTRING::from(path.rsplit('/').next().unwrap());
+        let name = if matches!(kind, Kind::RenameToMarkerAfterRead) && !self.opened_files.lock().unwrap().is_empty() {
+            HSTRING::from(".nomedia")
+        } else { HSTRING::from(path.rsplit('/').next().unwrap()) };
         let content = match kind {
             Kind::ReadFaultMetadata => return Err(windows::Win32::Foundation::ERROR_READ_FAULT.to_hresult().into()),
             Kind::MissingType => return Ok(vals),
             Kind::Storage | Kind::Service => WPD_CONTENT_TYPE_FUNCTIONAL_OBJECT,
             Kind::Folder | Kind::FolderWithStorageAlias | Kind::ReadFaultFolder => WPD_CONTENT_TYPE_FOLDER,
-            Kind::File(..) => WPD_CONTENT_TYPE_GENERIC_FILE,
+            Kind::File(..) | Kind::RenameToMarkerAfterRead => WPD_CONTENT_TYPE_GENERIC_FILE,
         };
         unsafe {
             vals.SetGuidValue(&WPD_OBJECT_CONTENT_TYPE, &content)?;
@@ -514,7 +517,8 @@ impl IPortableDeviceProperties_Impl for CameraSession_Impl {
                     PropVariantClear(&mut value)?;
                     set?;
                 }
-                Kind::Folder | Kind::FolderWithStorageAlias | Kind::ReadFaultFolder | Kind::ReadFaultMetadata | Kind::MissingType => (),
+                Kind::Folder | Kind::FolderWithStorageAlias | Kind::ReadFaultFolder | Kind::ReadFaultMetadata
+                    | Kind::MissingType | Kind::RenameToMarkerAfterRead => (),
             }
         }
         Ok(vals)
@@ -619,6 +623,7 @@ fn traced_phone(
         fields: keys(&[]).unwrap(), // The fixture returns all supported properties for each object.
         identity: "wpd:test-serial".into(),
         album_scope: AlbumScope::Unrestricted,
+        hidden_folders: Default::default(),
         storage_roots,
         folders: Default::default(),
     }
@@ -678,6 +683,190 @@ fn album_capture_ignores_private_and_unrelated_branches() {
     assert!(!reads.iter().any(|name| {
         ["outside", "loose", ".hidden"].iter().any(|&part| name.contains(part))
     }));
+}
+
+#[test]
+fn android_visible_nomedia_withholds_old_subtrees_and_reconciles_only_the_current_album() {
+    use crate::ingest::{
+        archive::{Archive, SavedFiles},
+        capture,
+    };
+    let _apartment = Apartment::new().unwrap();
+    let test = Sandbox::new();
+    let dest = test.dir("album");
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let broken = "Pictures/held/incomplete.jpg";
+    let rows = vec![
+        row("Pictures", Kind::Folder),
+        row(
+            "Pictures/still.jpg",
+            Kind::File(b"visible", SizeHint::Object),
+        ),
+        row("Pictures/held", Kind::Folder),
+        row(
+            "Pictures/held/private.jpg",
+            Kind::File(b"held back", SizeHint::Object),
+        ),
+        row(broken, Kind::File(b"broken", SizeHint::Object)),
+        row("Pictures/held/deep", Kind::Folder),
+        row(
+            "Pictures/held/deep/child.jpg",
+            Kind::File(b"nested", SizeHint::Object),
+        ),
+    ];
+    let source = |n, entries, short| {
+        let mut p = phone(n, entries, short, opened.clone());
+        p.album_scope = AlbumScope::Shared;
+        p
+    };
+    let run = |p: Phone| {
+        capture::receive(
+            &dest,
+            "Android",
+            |_| Ok(0),
+            || Ok(Box::new(p)),
+            |_| {},
+            || Ok(()),
+            || Ok(()),
+        )
+    };
+    let previous = source(1, rows.clone(), None);
+    {
+        let archive = Archive::open(&dest).unwrap();
+        crate::ingest::inbox::initialize(&archive.db).unwrap();
+        crate::ingest::resume::PhoneQueue::for_capture(&archive.db, previous.identity()).unwrap();
+        archive
+            .db
+            .execute(
+                "INSERT INTO phone_pending(source,entry,signature,occurrence,family)
+            VALUES(?,?,'7/10',1,'missing')",
+                rusqlite::params![
+                    previous.identity(),
+                    Path::new("Pictures")
+                        .join("held")
+                        .join("older.jpg")
+                        .to_string_lossy()
+                ],
+            )
+            .unwrap();
+    }
+    let mut saved = None;
+    previous
+        .visit(&mut |e| {
+            if let ScanEvent::Ready(item) = e
+                && item.relative.ends_with("child.jpg")
+            {
+                saved = Some(item);
+            }
+            Ok(())
+        })
+        .unwrap();
+    let partial = run(previous);
+    assert!(partial.safe_at.is_none());
+    assert_eq!(partial.list_total, Some(4));
+    let mut changed = rows;
+    changed.push(row("Pictures/held/unknown", Kind::MissingType));
+    changed.push(row(
+        "Pictures/held/.NoMedia",
+        Kind::File(b"", SizeHint::Object),
+    ));
+    let current = source(2, changed, None);
+    assert!(current.resolve(saved.as_ref().unwrap()).unwrap().is_none());
+    opened.lock().unwrap().clear();
+    let done = run(current);
+    assert!(done.safe_at.is_some(), "{}: {:?}", done.phase, done.issues);
+    assert_eq!((done.discovered, done.rechecked, done.pending), (1, 1, 0));
+    assert!(
+        opened
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|name| name == "Pictures/still.jpg")
+    );
+    let archive = Archive::open(&dest).unwrap();
+    assert_eq!(
+        archive
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM phone_inbox WHERE released=1",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert!(
+        archive
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM phone_inbox WHERE released=0",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap()
+            > 0
+    );
+}
+
+#[test]
+fn android_visible_directory_uses_its_marker_check_to_list_file_metadata() {
+    let _apartment = Apartment::new().unwrap();
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let rows = vec![
+        row("DCIM", Kind::Folder),
+        row("DCIM/first.jpg", Kind::File(b"one", SizeHint::Object)),
+        row("DCIM/second.jpg", Kind::File(b"two", SizeHint::Object)),
+    ];
+    let mut source = traced_phone(1, rows, None, Default::default(), Some(trace.clone()));
+    source.album_scope = AlbumScope::Shared;
+    let mut listed = 0;
+    source.visit(&mut |event| {
+        if matches!(event, ScanEvent::Ready(_)) {
+            listed += 1;
+        }
+        Ok(())
+    }).unwrap();
+    assert_eq!(listed, 2);
+    for name in ["DCIM/first.jpg", "DCIM/second.jpg"] {
+        assert_eq!(trace.lock().unwrap().iter().filter(|(path, _)| path == name).count(), 1);
+    }
+}
+
+#[test]
+fn android_visibility_fault_or_marker_rename_with_the_same_object_id_withholds_release() {
+    use crate::ingest::capture;
+    let _apartment = Apartment::new().unwrap();
+    let test = Sandbox::new();
+    for (label, kind) in [
+        ("unreadable", Kind::ReadFaultMetadata),
+        ("renamed", Kind::RenameToMarkerAfterRead),
+    ] {
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let rows = vec![
+            row("DCIM", Kind::Folder),
+            row("DCIM/photo.jpg", Kind::File(b"frame", SizeHint::Object)),
+            row("DCIM/ordinary.txt", kind),
+        ];
+        let mut p = phone(1, rows, None, opened.clone());
+        p.album_scope = AlbumScope::Shared;
+        let r = capture::receive(
+            &test.dir(label),
+            "Android",
+            |_| Ok(0),
+            || Ok(Box::new(p)),
+            |_| {},
+            || Ok(()),
+            || Ok(()),
+        );
+        assert!(
+            r.safe_at.is_none() && r.failed > 0,
+            "{label}: {:?}",
+            r.issues
+        );
+        if label == "unreadable" {
+            assert!(opened.lock().unwrap().is_empty());
+        }
+    }
 }
 
 #[test]

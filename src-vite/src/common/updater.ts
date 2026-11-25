@@ -9,8 +9,8 @@ export const updaterEnabled = import.meta.env.VITE_TIMECUT_UPDATER === '1';
 export const projectRepository = (import.meta.env.VITE_TIMECUT_REPOSITORY_URL || '').replace(/\/$/, '');
 
 const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000;
-const UPDATE_CHECK_KEY = 'lap_last_update_check';
-const UPDATE_RELEASE_NOTE_KEY = 'lap_update_release_note_version';
+const UPDATE_CHECK_KEY = 'timecut_last_update_check';
+const UPDATE_RELEASE_NOTE_KEY = 'timecut_update_release_note_version';
 const UPDATE_CHECK_TIMEOUT_MS = 8_000;
 
 function extractRawErrorMessage(error: unknown) {
@@ -76,7 +76,7 @@ export function useAppUpdater(localeMsg: Ref<any>, options: AppUpdaterOptions = 
   });
   const releaseNoteUrl = computed(() => {
     if (!projectRepository || !releaseNoteVersion.value) return '';
-    return `${projectRepository}/releases/tag/v${releaseNoteVersion.value}`;
+    return `${projectRepository}/releases/tag/timecut-v${encodeURIComponent(releaseNoteVersion.value)}`;
   });
   const downloadProgressLabel = computed(() => {
     if (downloadPercent.value === null) {

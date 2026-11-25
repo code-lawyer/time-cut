@@ -299,6 +299,7 @@ pub struct Phone {
     identity: String,
     album_scope: AlbumScope,
     storage_roots: HashSet<PathBuf>,
+    hidden_folders: std::cell::RefCell<HashSet<PathBuf>>,
     folders: std::cell::RefCell<resolve::Folders>,
 }
 
@@ -371,6 +372,8 @@ impl Drop for Phone {
 enum Object {
     Directory { relative: PathBuf, storage: bool },
     Media(Item),
+    NoMedia,
+    UnnamedFile,
     Other,
 }
 
@@ -427,6 +430,7 @@ impl Phone {
                 identity,
                 album_scope: if info.is_apple() { AlbumScope::Apple } else { AlbumScope::Shared },
                 storage_roots: HashSet::new(),
+                hidden_folders: Default::default(),
                 folders: Default::default(),
             };
             // Legacy checkpoints predate the scope. Identify actual storage
@@ -470,7 +474,7 @@ impl Phone {
 
     fn object_with_media(&self, id: &str, parent: &Path, media_in_parent: bool) -> Result<Object> {
         let vals = unsafe { self.props.GetValues(&HSTRING::from(id), &self.fields)? };
-        Self::describe(&vals, id, parent, media_in_parent, || unsafe {
+        Self::describe(&vals, id, parent, media_in_parent, false, || unsafe {
             self.transfer
                 .GetResourceAttributes(&HSTRING::from(id), &WPD_RESOURCE_DEFAULT)
                 .ok()?
@@ -485,6 +489,7 @@ impl Phone {
         id: &str,
         parent: &Path,
         media_in_parent: bool,
+        check_marker: bool,
         fallback_size: impl FnOnce() -> Option<u64>,
     ) -> Result<Object> {
         let kind = unsafe { vals.GetGuidValue(&WPD_OBJECT_CONTENT_TYPE)? };
@@ -494,6 +499,14 @@ impl Phone {
             && (kind == WPD_CONTENT_TYPE_IMAGE || kind == WPD_CONTENT_TYPE_VIDEO)
         {
             return Err("照片或视频暂未返回文件名".into());
+        }
+        if check_marker && kind != WPD_CONTENT_TYPE_FOLDER && kind != WPD_CONTENT_TYPE_FUNCTIONAL_OBJECT {
+            if name.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(".nomedia")) {
+                return Ok(Object::NoMedia);
+            }
+            if name.is_none() {
+                return Ok(Object::UnnamedFile);
+            }
         }
         let name = name.unwrap_or_else(|| id.to_owned());
         // A driver supplies one name, never a path.
@@ -594,6 +607,68 @@ impl Read for WpdReader {
 }
 
 impl Phone {
+    // A marker can be the last property returned. Decide visibility before opening
+    // any payload in this folder or following any child directory.
+    fn album_entries(
+        &self,
+        path: &Path,
+        children: &[String],
+        include_media: bool,
+        bulk: &mut Option<IPortableDevicePropertiesBulk>,
+    ) -> Result<Option<HashMap<String, Object>>> {
+        let mut unknown = None;
+        let mut entries = HashMap::new();
+        for batch in children.chunks(128) {
+            let mut values = HashMap::new();
+            if batch.len() >= 8
+                && let Some(api) = bulk.as_ref()
+            {
+                match bulk::objects(api, &self.fields, path, include_media, true, batch) {
+                    Ok(objects) if objects.is_empty() => *bulk = None,
+                    Ok(objects) => values = objects,
+                    Err(e) if interruption(e.as_ref()).is_some() => return Err(e),
+                    Err(_) => *bulk = None,
+                }
+            }
+            for id in batch {
+                let object = values.remove(id).map(Ok).unwrap_or_else(|| {
+                    let properties =
+                        unsafe { self.props.GetValues(&HSTRING::from(id), &self.fields)? };
+                    Self::describe(&properties, id, path, include_media, true, || None)
+                });
+                match object {
+                    Ok(Object::NoMedia) => return Ok(None),
+                    Ok(Object::UnnamedFile) => {
+                        unknown
+                            .get_or_insert_with(|| "设备未返回文件名，无法核对相册可见性".into());
+                    }
+                    Ok(object) => {
+                        if include_media {
+                            entries.insert(id.clone(), object);
+                        }
+                    }
+                    Err(e) if interruption(e.as_ref()).is_some() => return Err(e),
+                    Err(e) => {
+                        unknown.get_or_insert(e);
+                    }
+                }
+            }
+        }
+        if let Some(e) = unknown {
+            return Err(e);
+        }
+        Ok(Some(entries))
+    }
+
+    fn has_no_media(
+        &self,
+        path: &Path,
+        children: &[String],
+        bulk: &mut Option<IPortableDevicePropertiesBulk>,
+    ) -> Result<bool> {
+        Ok(self.album_entries(path, children, false, bulk)?.is_none())
+    }
+
     fn walk(
         &self,
         completed: Option<&CopyOrder>,
@@ -601,6 +676,8 @@ impl Phone {
     ) -> Result<()> {
         let mut pending = vec![("DEVICE".to_owned(), PathBuf::new(), DirectoryLevel::Device)];
         let mut visited = HashSet::new();
+        let mut album_paths = HashMap::new();
+        let mut ambiguous_paths = HashSet::new();
         let mut directory_lists = Vec::new();
         let mut retry_last = Vec::new();
         let mut bulk = completed.and_then(|_| {
@@ -609,7 +686,11 @@ impl Phone {
         let mut any_storage = false;
         let mut unreadable = 0;
         let mut first_error = None;
+        self.hidden_folders.borrow_mut().clear();
         while let Some((parent, path, level)) = pending.pop() {
+            if ambiguous_paths.contains(&path) {
+                continue;
+            }
             if !visited.insert(parent.clone()) {
                 continue;
             }
@@ -625,8 +706,37 @@ impl Phone {
                     continue;
                 }
             };
+            let mut screened = None;
+            let visibility = if self.album_scope == AlbumScope::Shared && level == DirectoryLevel::Album {
+                match self.album_entries(&path, &children, true, &mut bulk) {
+                    Ok(entries) => {
+                        let hidden = entries.is_none();
+                        screened = entries;
+                        Some(hidden)
+                    }
+                    Err(e) if interruption(e.as_ref()).is_some() => {
+                        return Err(read_error("核对相册可见性", &path, e));
+                    }
+                    Err(e) => {
+                        unreadable += 1;
+                        first_error.get_or_insert_with(|| format!("{}：{e}", path.display()));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             if completed.is_some() {
-                directory_lists.push((parent.clone(), path.clone(), directory_fingerprint(&children)));
+                directory_lists.push((
+                    parent.clone(),
+                    path.clone(),
+                    directory_fingerprint(&children),
+                    visibility,
+                ));
+            }
+            if visibility == Some(true) {
+                self.hidden_folders.borrow_mut().insert(path);
+                continue;
             }
             let errors_before = unreadable;
             let mut companions = Vec::new();
@@ -634,10 +744,11 @@ impl Phone {
             let media_in_parent = self.album_scope.includes_media(level);
             for batch in children.chunks(128) {
                 let mut values = HashMap::new();
-                if batch.len() >= 8
+                if screened.is_none()
+                    && batch.len() >= 8
                     && let Some(api) = &bulk
                 {
-                    match bulk::objects(api, &self.fields, &path, media_in_parent, batch) {
+                    match bulk::objects(api, &self.fields, &path, media_in_parent, false, batch) {
                         Ok(objects) if objects.is_empty() => bulk = None,
                         Ok(objects) => values = objects,
                         Err(e) if interruption(e.as_ref()).is_some() => return Err(read_error("批量读取目录内的文件信息", &path, e)),
@@ -645,8 +756,9 @@ impl Phone {
                     }
                 }
                 for id in batch {
-                    let object = match values
-                        .remove(id)
+                    let object = match screened.as_mut().and_then(|entries| entries.remove(id))
+                        .or_else(|| values.remove(id))
+                        .filter(|object| !matches!(object, Object::Media(item) if item.size.is_none()))
                         .map(Ok)
                         .unwrap_or_else(|| self.object_with_media(id, &path, media_in_parent))
                     {
@@ -667,6 +779,16 @@ impl Phone {
                             let Some(child) = self.album_scope.child(level, &relative, storage) else {
                                 continue;
                             };
+                            if self.album_scope == AlbumScope::Shared
+                                && album_paths.insert(relative.clone(), id.clone()).is_some_and(|old| old != *id)
+                            {
+                                ambiguous_paths.insert(relative.clone());
+                                unreadable += 1;
+                                first_error.get_or_insert_with(|| {
+                                    format!("{}：设备返回了同名目录，无法核对可见性", relative.display())
+                                });
+                                continue;
+                            }
                             any_storage = true;
                             if completed.is_some() { emit(ScanEvent::DirectoryFound(relative.clone()))?; }
                             pending.push((id.clone(), relative, child));
@@ -717,9 +839,11 @@ impl Phone {
         if completed.is_some() && unreadable == 0 && any_storage {
             let total = directory_lists.len() as u64;
             emit(ScanEvent::DirectoryCheck { done: 0, total })?;
-            for (index, (id, path, expected)) in directory_lists.iter().enumerate() {
+            for (index, (id, path, expected, visibility)) in directory_lists.iter().enumerate() {
                 let current = self.children(id).map_err(|e| read_error("复核目录", path, e))?;
-                if directory_fingerprint(&current) != *expected {
+                if directory_fingerprint(&current) != *expected
+                    || (visibility.is_some() && Some(self.has_no_media(path, &current, &mut bulk)?) != *visibility)
+                {
                     emit(ScanEvent::Unreadable(
                         "接收期间手机目录发生变化，将自动补查".into(),
                     ))?;
@@ -757,14 +881,24 @@ fn directory_fingerprint(ids: &[String]) -> blake3::Hash {
 }
 
 impl Source for Phone {
-    fn saved_files(&self) -> Option<&dyn super::archive::SavedFiles> { Some(self) }
+    fn saved_files(&self) -> Option<&dyn super::archive::SavedFiles> {
+        // A saved Android path alone cannot attest visibility. Resume receipts from a
+        // fresh folder walk so each set of siblings shares one live marker check.
+        (self.album_scope != AlbumScope::Shared).then_some(self)
+    }
     fn album_scope_version(&self) -> Option<&'static str> {
         match self.album_scope {
             AlbumScope::Apple => Some("apple-dcim-v1"),
-            AlbumScope::Shared => Some("android-albums-v1"),
+            AlbumScope::Shared => Some("android-albums-v2"),
             #[cfg(test)]
             AlbumScope::Unrestricted => None,
         }
+    }
+    fn excluded_album_folders(&self) -> HashSet<PathBuf> {
+        self.hidden_folders.borrow().clone()
+    }
+    fn uses_album_markers(&self) -> bool {
+        self.album_scope == AlbumScope::Shared
     }
 
     fn album_path_in_scope(&self, relative: &Path) -> bool {

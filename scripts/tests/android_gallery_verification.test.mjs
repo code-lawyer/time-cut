@@ -10,7 +10,7 @@ import { compareGalleryRun, galleryInbox, galleryScope, loadGallerySnapshot, obs
 // These expected values come from hashing the equivalent independent Shell list.
 const snapshot = {
   format: 'timecut-shell-gallery-path-size-sha256-v1', galleryRoots: ['DCIM', 'Pictures', 'Movies'],
-  rootFolders: 2, entries: 3, knownBytes: 28,
+  rootFolders: 2, entries: 3, knownBytes: 28, honorNoMedia: true,
   inventorySha256: 'a655df1108fbd4dc374228bd12c0b2c4057e56769fc74f12fa80ec2664578444',
   tokens: ['5b8a29d640d1e6d89ac469b47c1daf50acd91132e94f520d0a71a926502b6a9e',
     'c21bee99daf9db5e62f191e7701c2ba0c364edc94ef47f62efc37e6c1dd2e54e',
@@ -49,7 +49,7 @@ test('a saved Shell inventory includes multiplicity, order-independent checksum 
   fs.writeFileSync(name, JSON.stringify(snapshot));
   assert.deepEqual(loadGallerySnapshot(name), snapshot);
   for (const update of [{ tokens: [...new Set(snapshot.tokens)] }, { inventorySha256: '0'.repeat(64) },
-    { format: 'timecut-shell-path-size-sha256-v1' }, { knownBytes: null }]) {
+    { format: 'timecut-shell-path-size-sha256-v1' }, { knownBytes: null }, { honorNoMedia: false }]) {
     fs.writeFileSync(name, JSON.stringify({ ...snapshot, ...update }));
     assert.throws(() => loadGallerySnapshot(name));
   }

@@ -8,7 +8,7 @@ Opening a photo or running automatic local classification uses the local library
 
 ## Maps
 
-Viewing a map requests tiles for the visible area from the selected provider. Available layers include OpenStreetMap, Esri imagery and Tianditu when configured. Requests disclose your IP address and the requested map area to that provider. Tianditu requests include the token you entered.
+Photo details show the saved location locally. Opening the online map in photo details, or viewing the library map, requests tiles for the visible area from the selected provider. Available layers include OpenStreetMap, Esri imagery and Tianditu when configured. Requests disclose your IP address and the requested map area to that provider. Tianditu requests include the token you entered.
 
 ## Updates and diagnostics
 

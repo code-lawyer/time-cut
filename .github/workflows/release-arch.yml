@@ -15,6 +15,7 @@ permissions:
 
 jobs:
   package:
+    if: github.repository == 'julyx10/lap'
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:

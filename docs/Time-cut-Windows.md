@@ -4,7 +4,7 @@
 
 ## 用数据线归档
 
-手机自动导入读取 USB 可见的常规相册目录。安卓包括各存储卷的 `DCIM`、`Pictures`、`Movies` 及其子目录，iPhone 读取 `DCIM` 相机目录。安卓会跳过以点开头的隐藏项及 `Android/data` 等应用私有目录。要导入下载目录、`Android/media` 或其他位置的媒体，可先复制到电脑，再使用“本地文件夹”导入。
+手机自动导入读取 USB 可见的常规相册目录。安卓包括各存储卷的 `DCIM`、`Pictures`、`Movies` 及其子目录，iPhone 读取 `DCIM` 相机目录。安卓会跳过以点开头的隐藏项及 `Android/data` 等应用私有目录。若 USB 接口列出了目录中的 `.nomedia` 文件，该目录和子目录也会跳过。要导入下载目录、`Android/media` 或其他位置的媒体，可先复制到电脑，再使用“本地文件夹”导入。
 
 1. 在“手机插线导入”中开启“自动导入”。安卓解锁后将 USB 用途设为“文件传输”。图像传输模式可能只公开相机内容。
 2. iPhone 按系统提示解锁并“信任这台电脑”。Time-cut 可以从 Windows 照片接口接收，也可以通过 Apple 官方的「Apple 设备」读取已配对手机的相机原件。若希望保留 HEIC / HEVC 原始格式，在手机照片设置中将“传输到 Mac 或 PC”设为“保留原片”。如果 Windows 将已有 HEIF 原片列为相同设备标识、相同修改时间的 JPEG，界面会列出这批待核对项，程序先接收其他缺少的原件。仅在 iCloud 中保存的原件须先下载。
@@ -75,7 +75,7 @@ cargo build --locked --release --manifest-path src-tauri/Cargo.toml
 
 生成的便携目录、ZIP 和同名 `.sha256` 校验文件位于项目的 `release-test`。可用 `-OutputDirectory <目录>` 指定其他输出位置。同版本重打包会复用完全相同的展开目录；若内容不同，先保留上份目录，再发布干净的新目录。每个新包从干净目录组装，并在包内 `BUILD-INFO.json` 记录打包时的 Git 提交、工作树是否有修改、子模块提交和程序的 SHA-256。
 
-GitHub 的 **Time-cut Windows x64** 工作流在拉取请求和手动运行时生成可下载的候选产物。推送与源码版本一致的 `timecut-v<版本>` 标签会从该提交构建 ZIP、校验解压后的程序并运行桌面及恢复测试，通过后将 ZIP 和 SHA-256 附到该仓库的同标签 Release。此工作流发布 x64 便携版。
+GitHub 的 **Time-cut Windows x64** 工作流在拉取请求、main 更新和手动运行时生成候选产物。推送与源码版本一致的 `timecut-v<版本>` 标签后，会从该提交构建 x64 便携包，校验解压后的程序并运行桌面及恢复测试。工作流把便携 ZIP 和完整子模块源码包连同校验文件放入同标签的 Release 草稿。维护者核对实际发布的包，并补齐 FFmpeg 对应源码和校验文件后公开草稿。源码和静态库重建方式见随包许可证目录的 `Windows-source.md`。[Windows 对应源码说明](Windows-source.md)
 
 导入核心测试可用 `cargo test --release --manifest-path src-tauri/Cargo.toml ingest::` 运行。
 

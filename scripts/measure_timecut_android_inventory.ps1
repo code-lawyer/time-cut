@@ -21,7 +21,7 @@ param(
     [Parameter(Mandatory)][string]$Snapshot,
     [Parameter(ParameterSetName='Capture')][string]$DeviceName,
     [Parameter(ParameterSetName='Capture')][ValidateSet('Full','Gallery')][string]$Scope = 'Full',
-    [Parameter(ParameterSetName='Capture')][switch]$HonorNoMedia,
+    [Parameter(ParameterSetName='Capture')][switch]$HonorNoMedia = $true,
     [Parameter(ParameterSetName='Capture')][string]$FixtureDeviceRoot,
     [Parameter(ParameterSetName='Capture')][string[]]$FixtureStorageNames = @(),
     [Parameter(Mandatory, ParameterSetName='Compare')][string]$ArchiveRoot,

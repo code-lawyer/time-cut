@@ -38,7 +38,7 @@ fn wide<const N: usize>(s: &str) -> [u16; N] {
 
 pub(super) fn originals_safe(app: &AppHandle) {
     if let Some(tray) = app.tray_by_id("timecut") {
-        let _ = tray.set_tooltip(Some("Time-cut · 原件已收齐，可以拔线"));
+        let _ = tray.set_tooltip(Some("Time-cut"));
     }
     let Some(window) = app.get_webview_window("main") else {
         return;
@@ -56,8 +56,8 @@ pub(super) fn originals_safe(app: &AppHandle) {
         szTip: wide("Time-cut"),
         ..Default::default()
     };
-    // The Shell can suppress a balloon during Focus Assist. The application and
-    // its ordinary tray icon retain the same release status in that case.
+    // Focus Assist may suppress this one-time notification; the current
+    // transfer report remains available in the application.
     if unsafe { Shell_NotifyIconW(NIM_ADD, &notice) }.as_bool() {
         notice.uFlags = NIF_INFO;
         notice.dwInfoFlags = NIIF_INFO;

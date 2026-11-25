@@ -2,7 +2,7 @@ import ts from 'typescript';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readTestSource } from './readSource.mjs';
-import { compile, computed, createSSRApp, ref, reactive } from 'vue';
+import { compile, computed, createSSRApp, h, nextTick, ref, reactive, watch } from 'vue';
 import { renderToString } from 'vue/server-renderer';
 
 const source = readTestSource('../src/components/FileInfo.vue');
@@ -74,6 +74,36 @@ test('location accepts zero coordinates and rejects missing or invalid coordinat
   for (const [lat, lon, expected] of [[0,0,true], ['0','120',true], [null,0,false], ['',0,false], [91,0,false], [0,181,false], ['bad',0,false]]) {
     assert.equal(valid({ gps_latitude: lat, gps_longitude: lon }), expected);
   }
+});
+
+test('opening details or changing photo does not mount online tiles without requesting that location', async () => {
+  const templateStart = source.indexOf('<template v-if="fieldVisible(\'location.map\') && hasCoordinates">');
+  const templateEnd = source.indexOf('</template>', templateStart);
+  const watchStart = source.indexOf('const onlineMapOpen =');
+  const watchEnd = source.indexOf('watch(() => [libConfig._libraryId', watchStart);
+  assert.ok(templateStart >= 0 && templateEnd > templateStart && watchStart >= 0 && watchEnd > watchStart);
+  const renderMap = compile(source.slice(templateStart, templateEnd + '</template>'.length));
+  const props = reactive({ fileInfo: { gps_latitude: 1, gps_longitude: 2 } });
+  const key = ref('test:1'), panel = ref(true);
+  const open = new Function('ref', 'watch', 'activeInfoKey', 'props', 'showMapPanel',
+    source.slice(watchStart, watchEnd) + '\nreturn onlineMapOpen;')(ref, watch, key, props, panel);
+  function render() {
+    const app = createSSRApp({ setup: () => ({ fieldVisible: () => true, hasCoordinates: true,
+      fileInfo: props.fileInfo, onlineMapOpen: open }), render: renderMap });
+    app.config.globalProperties.$t = key => key;
+    app.component('MapView', { render: () => h('div', 'ONLINE TILES') });
+    return renderToString(app);
+  }
+  assert.doesNotMatch(await render(), /ONLINE TILES/);
+  open.value = true;
+  assert.match(await render(), /ONLINE TILES/);
+  key.value = 'other-library:1';
+  await nextTick();
+  assert.doesNotMatch(await render(), /ONLINE TILES/);
+  open.value = true;
+  props.fileInfo.gps_longitude = 3;
+  await nextTick();
+  assert.doesNotMatch(await render(), /ONLINE TILES/);
 });
 
 

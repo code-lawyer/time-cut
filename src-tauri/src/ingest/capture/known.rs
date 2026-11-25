@@ -256,7 +256,7 @@ pub(super) fn resume<Guard>(
             report.list_covered += added;
             report.newly_verified += added;
         }
-        save_progress(db, run, report)?;
+        save_progress(db, run, report, None)?;
         receipt?;
         publish(report, false);
     }

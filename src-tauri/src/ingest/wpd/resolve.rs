@@ -15,10 +15,17 @@ impl Phone {
         let mut parent_id = String::from("DEVICE");
         let mut path = PathBuf::new();
         let mut level = DirectoryLevel::Device;
+        let mut bulk = windows_core::Interface::cast::<IPortableDevicePropertiesBulk>(&self.props).ok();
         for component in folder.components() {
             let std::path::Component::Normal(name) = component else {
                 return Ok(false);
             };
+            if self.album_scope == AlbumScope::Shared
+                && level == DirectoryLevel::Album
+                && self.has_no_media(&path, &self.children(&parent_id)?, &mut bulk)?
+            {
+                return Ok(false);
+            }
             let folders = match cache.named.entry(parent_id.clone()) {
                 std::collections::hash_map::Entry::Occupied(known) => known.into_mut(),
                 std::collections::hash_map::Entry::Vacant(slot) => {
@@ -27,7 +34,7 @@ impl Phone {
                         let values =
                             unsafe { self.props.GetValues(&HSTRING::from(&id), &self.fields)? };
                         if let Object::Directory { relative, storage } =
-                            Self::describe(&values, &id, &path, false, || None)?
+                            Self::describe(&values, &id, &path, false, false, || None)?
                             && let Some(child_level) = self.album_scope.child(level, &relative, storage)
                         {
                             // The displayed path must identify exactly one directory.
@@ -49,6 +56,11 @@ impl Phone {
         }
         if !self.album_scope.includes_file(level, file) {
             return Ok(false);
+        }
+        if self.album_scope == AlbumScope::Shared {
+            let live = self.children(&parent_id)?;
+            return Ok(!self.has_no_media(&path, &live, &mut bulk)?
+                && live.iter().any(|child| child == id));
         }
         let children = match cache.members.entry(parent_id) {
             std::collections::hash_map::Entry::Occupied(known) => known.into_mut(),
@@ -92,6 +104,9 @@ impl Phone {
 
 impl SavedFiles for Phone {
     fn resolve(&self, expected: &Item) -> Result<Option<Item>> {
+        if self.album_scope == AlbumScope::Shared {
+            self.folders.replace(Folders::default());
+        }
         let Some((key, _)) = expected
             .version
             .as_deref()

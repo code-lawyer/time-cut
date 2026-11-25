@@ -393,6 +393,38 @@ fn narrowed_album_scope_resumes_an_open_run_and_releases_only_its_exact_members(
     assert_eq!(originals(&root).len(),2);
 }
 
+#[test]
+fn a_hidden_folder_subtracts_only_its_own_members_at_the_peak_and_keeps_unrelated_pending() {
+    use super::{inbox, inventory, resume::PhoneQueue};
+    use std::collections::{HashMap, HashSet};
+    let temp = Sandbox::new();
+    let archive = Archive::open(&temp.dir("archive")).unwrap();
+    let db = &archive.db;
+    inbox::initialize(db).unwrap();
+    PhoneQueue::for_capture(db, "device").unwrap();
+    db.execute_batch("INSERT INTO phone_runs(id,source,started,peak) VALUES(1,'device',1,12);
+        INSERT INTO phone_peak_folders VALUES(1,'{\"DCIM/held_%\":2,\"DCIM/public\":10}');
+        INSERT INTO phone_list_folders(run_id,path,item_count) VALUES(1,'DCIM/held_%',10);
+        INSERT INTO phone_pending(source,entry,signature,occurrence,family) VALUES
+        ('device','DCIM/held_%/a.jpg','9/1',1,'a'),('device','DCIM/held_%_other/b.jpg','8/1',1,'b')").unwrap();
+    let mut queue = PhoneQueue::for_capture(db, "device").unwrap();
+    let hidden = HashSet::from([PathBuf::from("DCIM/held_%")]);
+    let seen = HashMap::from([(PathBuf::from("DCIM/public"), 3)]);
+    let mut report = super::Report {
+        discovered: 3,
+        ..Default::default()
+    };
+    for _ in 0..2 {
+        assert_eq!(
+            inventory::withhold_folders(db, 1, "device", &hidden, &seen, &mut queue, &mut report)
+                .unwrap(),
+            10
+        );
+        assert_eq!(queue.count(), 1);
+        assert_eq!(PhoneQueue::for_capture(db, "device").unwrap().count(), 1);
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn an_unaffordable_group_of_changed_jpeg_exports_does_not_consume_space_needed_for_originals() {

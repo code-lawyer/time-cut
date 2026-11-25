@@ -2,7 +2,8 @@
 param(
     [ValidateSet("x64", "x86_64", "arm64", "aarch64")]
     [string]$Arch,
-    [switch]$VerifyOnly
+    [switch]$VerifyOnly,
+    [string]$Archive
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,23 +38,25 @@ switch ($Arch) {
     }
 }
 
-$Downloads = if ($TripleSuffix -eq 'x86_64-pc-windows-msvc') {
-    @(
-        @{ Name = 'ffmpeg'; Id = 405019646; Hash = '1a65d5b0b10d8d9a81d2824a3538046a40ed3607c906b335a166add87613f705' },
-        @{ Name = 'ffprobe'; Id = 405019652; Hash = '54b944d6095c4588d7548424d7acd5118390a9d4f01b1c92f841547fc9a7429c' }
-    )
-} else {
-    @(
-        @{ Name = 'ffmpeg'; Id = 405019640; Hash = '2cc705fb32146906817c8bd0dd599f5b6f09146c003728420d0fa60617b32708' },
-        @{ Name = 'ffprobe'; Id = 405019641; Hash = '22ad65e855310b2c6c0f8f9858f6fd7fe69788f7265fc12abd8d21455bcfbb5c' }
-    )
-}
-
 function Assert-SidecarHash([string]$Path, [string]$Expected) {
     if ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -ne $Expected) {
         throw "SHA-256 mismatch for $Path"
     }
 }
+
+if ($TripleSuffix -eq 'x86_64-pc-windows-msvc') {
+    $arguments = @((Join-Path $ScriptDir 'fetch_timecut_ffmpeg.py'), $TargetDir)
+    if ($VerifyOnly) { $arguments += '--verify-only' }
+    if ($Archive) { $arguments += @('--archive', (Resolve-Path -LiteralPath $Archive).ProviderPath) }
+    & python @arguments
+    if ($LASTEXITCODE -ne 0) { throw 'Windows x64 FFmpeg verification failed' }
+    return
+}
+if ($Archive) { throw 'A local release archive is supported for Windows x64.' }
+$Downloads = @(
+    @{ Name = 'ffmpeg'; Id = 405019640; Hash = '2cc705fb32146906817c8bd0dd599f5b6f09146c003728420d0fa60617b32708' },
+    @{ Name = 'ffprobe'; Id = 405019641; Hash = '22ad65e855310b2c6c0f8f9858f6fd7fe69788f7265fc12abd8d21455bcfbb5c' }
+)
 
 Write-Host "Downloading FFmpeg sidecar files ($Arch) into $TargetDir..."
 foreach ($Asset in $Downloads) {

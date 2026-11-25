@@ -19,6 +19,7 @@ pub(super) struct PhoneQueue {
     known_families: HashSet<String>,
     received_versions: HashMap<String, HashSet<String>>,
     pending: HashSet<Entry>,
+    #[cfg(test)]
     interrupted: HashMap<String, i64>,
     occurrences: HashMap<(String, String), u32>,
     handles: HashMap<String, Entry>,
@@ -91,10 +92,13 @@ impl PhoneQueue {
             known_families.insert(row.get(1)?);
         }
         let mut pending = HashSet::new();
+        #[cfg(test)]
         let mut interrupted = HashMap::<String, i64>::new();
-        let mut saved = db.prepare(
-            "SELECT entry,signature,occurrence,family,attempted_at FROM phone_pending WHERE source=?",
-        )?;
+        let mut saved = db.prepare(if cfg!(test) {
+            "SELECT entry,signature,occurrence,family,attempted_at FROM phone_pending WHERE source=?"
+        } else {
+            "SELECT entry,signature,occurrence FROM phone_pending WHERE source=?"
+        })?;
         let mut rows = saved.query([source])?;
         while let Some(row) = rows.next()? {
             pending.insert(Entry {
@@ -102,10 +106,13 @@ impl PhoneQueue {
                 signature: row.get(1)?,
                 occurrence: row.get(2)?,
             });
-            let attempted: i64 = row.get(4)?;
-            if attempted > 0 {
-                let last = interrupted.entry(row.get(3)?).or_default();
-                *last = (*last).max(attempted);
+            #[cfg(test)]
+            {
+                let attempted: i64 = row.get(4)?;
+                if attempted > 0 {
+                    let last = interrupted.entry(row.get(3)?).or_default();
+                    *last = (*last).max(attempted);
+                }
             }
         }
         Ok(Self {
@@ -115,6 +122,7 @@ impl PhoneQueue {
             known_families,
             received_versions: HashMap::new(),
             pending,
+            #[cfg(test)]
             interrupted,
             occurrences: HashMap::new(),
             handles: HashMap::new(),

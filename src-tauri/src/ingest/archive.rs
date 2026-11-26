@@ -76,6 +76,8 @@ pub trait SavedFiles {
     fn resolve(&self, expected: &Item) -> Result<Option<Item>>;
 }
 
+pub(super) const APPLE_EXPORT_SCOPE: &str = "apple-camera-v2";
+
 pub trait Source {
     fn identity(&self) -> &str;
     /// Identifies the directory policy behind persisted phone inventories.

@@ -36,7 +36,7 @@ fn wide<const N: usize>(s: &str) -> [u16; N] {
     buffer
 }
 
-pub(super) fn originals_safe(app: &AppHandle) {
+pub(super) fn originals_safe(app: &AppHandle, apple_only: bool) {
     if let Some(tray) = app.tray_by_id("timecut") {
         let _ = tray.set_tooltip(Some("Time-cut"));
     }
@@ -61,8 +61,9 @@ pub(super) fn originals_safe(app: &AppHandle) {
     if unsafe { Shell_NotifyIconW(NIM_ADD, &notice) }.as_bool() {
         notice.uFlags = NIF_INFO;
         notice.dwInfoFlags = NIIF_INFO;
-        notice.szInfoTitle = wide("Time-cut · 原件已收齐");
-        notice.szInfo = wide("可以拔下手机。电脑会继续整理照片和视频。");
+        notice.szInfoTitle = wide(if apple_only { "Time-cut · Apple 相机原件已收齐" } else { "Time-cut · 原件已收齐" });
+        notice.szInfo = wide(if apple_only { "相机原件已保存在本机。请在导入窗口查看 Windows 导出进度。" }
+            else { "可以拔下手机。电脑会继续整理照片和视频。" });
         let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &notice) };
         let handle = hwnd.0 as usize;
         std::thread::spawn(move || {

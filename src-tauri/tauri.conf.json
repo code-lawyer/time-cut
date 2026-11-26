@@ -1,6 +1,6 @@
 {
   "productName": "Time-cut",
-  "version": "0.1.0-preview.40",
+  "version": "0.1.0-preview.42",
   "identifier": "app.timecut.album",
   "build": {
     "beforeBuildCommand": "pnpm --dir ../src-vite build",
@@ -9,7 +9,7 @@
     "frontendDist": "../src-vite/dist"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "macOSPrivateApi": true,
     "windows": [
       {
@@ -32,17 +32,9 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$HOME/**",
-          "$PICTURES/**",
-          "$VIDEOS/**",
-          "$DOCUMENT/**",
-          "$DESKTOP/**",
-          "$DOWNLOAD/**",
           "$APPCACHE/**",
-          "/Volumes/**",
-          "/media/**",
-          "/mnt/**",
-          "/run/media/**"
+          "$APPLOCALDATA/**",
+          "$APPDATA/**"
         ]
       }
     }

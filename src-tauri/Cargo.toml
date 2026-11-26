@@ -1,10 +1,10 @@
 [package]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 name = "Lap"
-version = "0.1.0-preview.40"
+version = "0.1.0-preview.42"
 description = "An offline-first photo manager for large local libraries."
-homepage = "https://julyx10.github.io/lap"
-repository = "https://github.com/julyx10/lap"
+homepage = "https://github.com/code-lawyer/time-cut"
+repository = "https://github.com/code-lawyer/time-cut"
 authors = ["julyx10 <tiangle@gmail.com>"]
 edition = "2024"
 license = "GPL-3.0-or-later"

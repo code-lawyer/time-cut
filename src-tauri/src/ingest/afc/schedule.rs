@@ -1,5 +1,6 @@
 use super::{AfcError, IdeviceError};
 use crate::ingest::archive::{CopyOrder, Item, Result, ScanEvent, Source};
+#[cfg(test)]
 use rusqlite::{Connection, params};
 use std::{
     collections::{HashMap, HashSet},
@@ -13,10 +14,12 @@ pub(super) struct Plan {
     saved: HashMap<PathBuf, HashSet<String>>,
     pending: Vec<Item>,
     pending_versions: HashMap<PathBuf, HashSet<String>>,
+    #[cfg(test)]
     pub saved_count: u64,
 }
 
 impl Plan {
+    #[cfg(test)]
     pub fn load(db: &Connection, run: i64, source: &str) -> Result<Self> {
         let mut plan = Self::default();
         let mut query = db.prepare(

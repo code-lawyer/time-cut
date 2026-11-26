@@ -14,8 +14,11 @@
         </button>
       </header>
 
+      <PhoneStatus v-if="current?.capture" :report="current" :busy="state.busy" :live-release="liveRelease"
+        :connected="state.devices.includes(current.source)" :historical="current !== state.report" />
+
       <div class="import-scroll">
-        <ImportReport v-if="current && state.busy" :current="current" busy :recent="state.recent" :live-release="liveRelease" />
+        <ImportReport v-if="current && state.busy && !current.capture" :current="current" busy :recent="state.recent" />
         <section class="import-section" aria-labelledby="timecut-destination">
           <h2 id="timecut-destination">{{ t('timecut.destination') }}</h2>
           <form v-if="editingRoot || !state.target" class="section-form" @submit.prevent="saveTarget">
@@ -80,7 +83,12 @@
           <p v-if="feedback?.at === 'folder'" :role="feedback.error ? 'alert' : 'status'" :class="['feedback', { problem: feedback.error }]">{{ feedback.text }}</p>
         </section>
 
-        <ImportReport v-if="current && !state.busy" :current="current" :recent="state.recent" :live-release="liveRelease"
+        <details v-if="current?.capture" class="phone-details">
+          <summary>{{ t('timecut.transferDetails') }}</summary>
+          <ImportReport :current="current" :busy="state.busy" :recent="state.recent" :live-release="liveRelease"
+            :retry-at="state.target?.auto ? (state.apple_retry_at ?? state.next_retry_at) : null" />
+        </details>
+        <ImportReport v-else-if="current && !state.busy" :current="current" :recent="state.recent"
           :retry-at="state.target?.auto ? (state.apple_retry_at ?? state.next_retry_at) : null" />
         <p v-if="serviceError" class="feedback problem service-error" role="alert">{{ serviceError }}</p>
       </div>
@@ -98,6 +106,7 @@ import { openFolderDialog } from '@/common/utils';
 import { useTimecutIndex } from '@/composables/useTimecutIndex';
 import { useUIStore } from '@/stores/uiStore';
 import ImportReport from './TimecutImportReport.vue';
+import PhoneStatus from './TimecutPhoneStatus.vue';
 
 const { t, n } = useI18n();
 const uiStore = useUIStore();
@@ -111,13 +120,16 @@ const recentRelease = ref(null);
 const current = computed(() => state.value.report?.phase ? state.value.report : state.value.busy ? null : state.value.recent[0]);
 const liveRelease = computed(() => {
   const report = state.value.report, release = recentRelease.value, target = state.value.target;
-  return !!release && !report.local_errors && report.safe_at === release.safe_at && report.device_key === release.device_key
+  return !!release && !report.local_errors && (!report.phone_channel || report.windows_export?.complete)
+    && report.safe_at === release.safe_at && report.device_key === release.device_key
     && report.source === release.source && target?.library === release.library && target?.album === release.album
     && target?.root === release.root && state.value.devices.length === 1 && state.value.devices[0] === report.source;
 });
 const importLabel = computed(() => {
   if (state.value.report.local_errors) return t('timecut.localRepair');
   if (liveRelease.value) return t('timecut.safeToUnplug');
+  if (state.value.report.phone_channel === 'apple_camera' && state.value.report.safe_at
+    && state.value.devices.includes(state.value.report.source)) return t('timecut.appleOriginalsComplete');
   if (!state.value.busy) return t('timecut.title');
   if (state.value.report.phase === '正在本地整理') return t('timecut.localFiling');
   const report = state.value.report;
@@ -303,6 +315,12 @@ function submitFolder() {
 .import-section { margin-inline: 1.35rem; padding-block: 1rem; border-bottom: 1px solid var(--line); }
 .import-section:last-child { border: none; }
 .import-section h2 { font-size: .98rem; font-weight: 650; }
+.phone-details > summary {
+  margin-inline: 1.35rem;
+  padding-block: .7rem;
+  font-weight: 600;
+  cursor: pointer;
+}
 .section-heading, .device-row, .mode-row { justify-content: space-between; flex-wrap: wrap; }
 .section-form { display: grid; gap: .55rem; margin-top: .5rem; }
 .help, .feedback, .device-row { font-size: .8125rem; }
@@ -336,6 +354,6 @@ function submitFolder() {
 .service-error { margin: .65rem 1.35rem; }
 @media (max-width: 32rem), (max-height: 35rem) {
   .import-header { padding: .65rem .9rem; }
-  .import-section { margin-inline: .9rem; padding-block: .7rem; }
+  .import-section, .phone-details > summary { margin-inline: .9rem; padding-block: .7rem; }
 }
 </style>

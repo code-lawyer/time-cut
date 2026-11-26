@@ -45,6 +45,30 @@ pub fn make_video_stream_url(file_path: &str) -> Result<String, String> {
     Ok(format!("{}{}", original_media_base_url()?, encoded))
 }
 
+/// Open the file the path resolves to. A link is served only when its target
+/// is a regular file inside the caller's allowed library or cache.
+fn open_library_file(
+    path: &std::path::Path,
+    is_allowed: impl FnOnce(&std::path::Path) -> bool,
+) -> Result<(std::fs::File, String), &'static str> {
+    if !path.is_absolute() {
+        return Err("403 Forbidden");
+    }
+    let canonical = path.canonicalize().map_err(|_| "404 Not Found")?;
+    if !canonical.is_absolute() || !is_allowed(&canonical) {
+        return Err("403 Forbidden");
+    }
+    let metadata = std::fs::symlink_metadata(&canonical).map_err(|_| "404 Not Found")?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || crate::t_utils::is_cloud_only(&metadata)
+    {
+        return Err("403 Forbidden");
+    }
+    let file = std::fs::File::open(&canonical).map_err(|_| "404 Not Found")?;
+    Ok((file, canonical.to_string_lossy().into_owned()))
+}
+
 fn parse_http_range(range_header: &str, file_size: u64) -> Option<(u64, u64)> {
     if file_size == 0 {
         return None;
@@ -193,19 +217,8 @@ async fn serve_request(
         return reject(stream, "403 Forbidden").await;
     };
     let opened = tokio::task::spawn_blocking(move || {
-        let path = path.as_ref();
-        if !path.is_absolute() || !is_allowed(path) {
-            return Err("403 Forbidden");
-        }
-        let metadata = std::fs::metadata(path).map_err(|_| "404 Not Found")?;
-        if !metadata.is_file() || crate::t_utils::is_cloud_only(&metadata) {
-            return Err("403 Forbidden");
-        }
-        let file = std::fs::File::open(path).map_err(|_| "404 Not Found")?;
-        Ok((
-            tokio::fs::File::from_std(file),
-            path.to_string_lossy().into_owned(),
-        ))
+        let (file, path) = open_library_file(path.as_ref(), is_allowed)?;
+        Ok((tokio::fs::File::from_std(file), path))
     })
     .await;
     let (mut file, path) = match opened {
@@ -278,6 +291,7 @@ mod tests {
     async fn streams_full_files_and_ranges_only_with_the_route_and_scope() {
         let path = std::env::temp_dir().join(format!("Lap {} # 示例.mp4", uuid::Uuid::new_v4()));
         std::fs::write(&path, b"0123456789").unwrap();
+        let path = path.canonicalize().unwrap();
         let encoded = percent_encoding::utf8_percent_encode(
             path.to_str().unwrap(),
             percent_encoding::NON_ALPHANUMERIC,
@@ -396,12 +410,52 @@ mod tests {
             &format!("/media/test/{encoded}"),
             "GET",
             "",
-            Some(image_path.clone()),
+            Some(image_path.canonicalize().unwrap()),
         )
         .await;
         assert!(headers.contains("Content-Type: image/png"));
         assert_eq!(body, image);
 
+        let outside = path.with_file_name(format!("secret-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&outside, b"secret").unwrap();
+        let link = path.with_file_name(format!("link-{}.mp4", uuid::Uuid::new_v4()));
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(&outside, &link);
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&outside, &link);
+        if linked.is_err() {
+            // Creating a file link needs SeCreateSymbolicLinkPrivilege. The
+            // requests above already checked the canonical file itself.
+            std::fs::remove_file(outside).unwrap();
+            std::fs::remove_file(image_path).unwrap();
+            std::fs::remove_file(path).unwrap();
+            return;
+        }
+        let encoded = percent_encoding::utf8_percent_encode(
+            link.to_str().unwrap(),
+            percent_encoding::NON_ALPHANUMERIC,
+        );
+        let (headers, body) = request(
+            &format!("/media/test/{encoded}"),
+            "GET",
+            "",
+            Some(path.clone()),
+        )
+        .await;
+        assert!(headers.starts_with("HTTP/1.1 403"), "{headers}");
+        assert!(body.is_empty());
+        let (headers, body) = request(
+            &format!("/media/test/{encoded}"),
+            "GET",
+            "",
+            Some(outside.canonicalize().unwrap()),
+        )
+        .await;
+        assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+        assert_eq!(body, b"secret");
+
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_file(outside).unwrap();
         std::fs::remove_file(image_path).unwrap();
         std::fs::remove_file(path).unwrap();
     }

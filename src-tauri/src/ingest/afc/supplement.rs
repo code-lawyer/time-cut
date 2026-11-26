@@ -1,134 +1,45 @@
-//! Receive camera originals via the paired phone while its Windows export is unavailable.
-//! The two source inventories remain independently identifiable in the same archive.
-use super::{Audit, Phone, same_hardware, scan, schedule::Plan};
-use crate::ingest::{
-    Phase,
-    archive::{Archive, Result, Source},
-    inbox, verification,
-};
-use rusqlite::{OptionalExtension, params};
-use std::{cell::Cell, path::Path};
+//! Carry forward receipts from archives that acquired AFC as a Windows supplement.
+use crate::ingest::{Report, archive::{Archive, Result}};
+use rusqlite::params;
+use std::path::Path;
 
-pub(in crate::ingest) fn stalled(report: &crate::ingest::Report) -> bool {
-    report.safe_at.is_none()
-        && report.newly_verified == 0
-        && report.device_key.is_some()
-        && (report.export_shortfall.is_some() || matches!(
-            report.phase,
-            Phase::MediaUnavailable | Phase::SessionInterrupted | Phase::ContentMismatch | Phase::AppleNeedsSupplement
-        ))
-}
+#[cfg(test)]
+use super::{Audit, same_hardware, scan, schedule::Plan};
+#[cfg(test)]
+use crate::ingest::{archive::Source, inbox, verification};
+#[cfg(test)]
+use rusqlite::OptionalExtension;
+#[cfg(test)]
+use std::cell::Cell;
 
-/// Enter from the normal desktop worker after the WPD session has released all handles.
-pub(super) fn receive(
-    view: &std::sync::Mutex<crate::ingest::View>,
-    db: &rusqlite::Connection,
-    dest: &crate::ingest::Target,
-    windows: Option<&crate::ingest::Report>,
-    phone: &Phone,
-    key: &str,
-) -> Result<bool> {
-    use crate::ingest::{Report, catalog, recent, record_history};
-    let root = Path::new(&dest.root);
-    let mut report = match windows {
-        Some(current) => current.clone(),
-        None => recent(db)?.into_iter()
-            .find(|r| r.device_key.as_deref() == Some(key) && r.safe_at.is_none())
-            .unwrap_or_else(|| Report {
-                source: "iPhone".into(), phone: true, capture: true,
-                device_key: Some(key.to_owned()), ..Default::default()
-            }),
-    };
-    // A saved report can describe an interrupted older native attempt.
-    if report.native_originals.is_some() { report.issues.clear(); report.failed = 0; }
-    report.native_originals = None;
-    let active = || -> Result<()> {
-        if view.lock().map_err(|e| e.to_string())?.target.as_ref() != Some(dest) {
-            return Err("相册或自动导入设置已变化".into());
-        }
-        Ok(())
-    };
-    let guard = std::cell::RefCell::new(catalog::guard_destination(dest, catalog::album_path));
-    let repeat_requested: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM phone_repeat WHERE library=? AND album=? AND device=?)",
-        params![dest.library, dest.album, key], |row| row.get(0),
-    )?;
-    let result = collect(
-        root,
-        key,
-        &phone.serial,
-        phone,
-        repeat_requested,
-        |snapshot| {
-            report.native_originals = Some(snapshot.clone());
-            report.phase = "正在核对 Apple 相机原件".into();
-            let mut live = view.lock().unwrap();
-            live.busy = true;
-            if !live.devices.contains(&report.source) { live.devices.push(report.source.clone()); }
-            live.report = report.clone();
-        },
-        || (guard.borrow_mut())(),
-        active,
-    );
-    let interrupted = result.is_err();
-    match result {
-        Ok(Some(summary)) => {
-            report.native_originals = Some(summary);
-            report.phase = "已核对 Apple 相机原件".into();
-        }
-        Ok(None) => return Ok(false),
-        Err(e) => {
-            if report.native_originals.is_none() {
-                return Err(e);
-            }
-            report.phase = "Apple 相机原件核对中断".into();
-            crate::ingest::issue(&mut report, e.to_string());
-        }
-    }
-    let mut live = view.lock().unwrap();
-    live.busy = false;
-    live.report = report.clone();
-    record_history(db, &report)?;
-    live.recent = recent(db)?;
-    Ok(interrupted)
-}
-
-pub(super) fn pending_sources(db: &rusqlite::Connection, expected: Option<&str>) -> Result<Vec<(String, String)>> {
-    let has_runs: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='phone_runs')",
-        [], |r| r.get(0),
-    )?;
-    if !has_runs {
-        return Ok(Vec::new());
-    }
-    let mut query = db.prepare("SELECT DISTINCT source FROM phone_runs WHERE safe_at IS NULL AND source LIKE 'wpd:%' ORDER BY source")?;
-    let mut pending = Vec::new();
-    for row in query.query_map([], |r| r.get::<_, String>(0))? {
-        let source = row?;
-        let Some(id) = source.strip_prefix("wpd:").filter(|id| !id.is_empty()) else { continue };
-        let key = verification::device_key(&source);
-        if expected.is_none_or(|value| value == key) { pending.push((id.to_owned(), key)); }
-    }
-    Ok(pending)
+pub(super) fn reconcile(root: &Path, udid: &str, report: &Report) -> Result<()> {
+    let source = format!("afc:{udid}");
+    let archive = Archive::open(root)?;
+    let tx = archive.db.unchecked_transaction()?;
+    // Fill only exact missing receipts from the completed AFC manifest. Old
+    // versions and conflicts remain visible on their original Windows run.
+    let manifest = "SELECT m.entry,m.version,m.size,m.digest FROM phone_manifest m
+        JOIN phone_runs r ON r.id=m.run_id WHERE r.source=?1 AND r.safe_at=?2";
+    tx.execute(&format!("WITH verified AS ({manifest})
+        UPDATE phone_native_items AS n SET digest=v.digest FROM verified v
+        WHERE n.source=?1 AND n.entry=v.entry AND n.version=v.version AND n.size=v.size
+          AND n.digest IS NULL AND n.conflict=0"), params![source, report.safe_at])?;
+    tx.execute(&format!("WITH verified AS ({manifest})
+        UPDATE phone_native_supplements AS s SET checked_at=?2,
+          listed=(SELECT COUNT(*) FROM phone_native_items n WHERE n.run_id=s.run_id AND n.source=s.source)
+        WHERE s.source=?1 AND s.checked_at IS NULL
+          AND EXISTS(SELECT 1 FROM phone_native_items n WHERE n.run_id=s.run_id AND n.source=s.source)
+          AND NOT EXISTS(SELECT 1 FROM phone_native_items n WHERE n.run_id=s.run_id AND n.source=s.source
+            AND (n.conflict<>0 OR NOT EXISTS(SELECT 1 FROM verified v
+              WHERE v.entry=n.entry AND v.version=n.version AND v.size=n.size AND v.digest=n.digest)))"),
+        params![source, report.safe_at])?;
+    tx.commit()?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_unlisted_windows_camera_can_resume_only_an_unfinished_device_in_the_selected_gallery() {
-        let db = rusqlite::Connection::open_in_memory().unwrap();
-        assert!(pending_sources(&db, None).unwrap().is_empty());
-        db.execute_batch("CREATE TABLE phone_runs(source TEXT,safe_at INTEGER);
-            INSERT INTO phone_runs VALUES('wpd:camera-a',NULL),('wpd:camera-a',NULL),('wpd:camera-b',NULL),
-            ('wpd:completed',123),('afc:other',NULL),('wpd:',NULL)").unwrap();
-        let a = verification::device_key("wpd:camera-a");
-        let b = verification::device_key("wpd:camera-b");
-        assert_eq!(pending_sources(&db, None).unwrap(), vec![("camera-a".into(),a.clone()),("camera-b".into(),b.clone())]);
-        assert_eq!(pending_sources(&db, Some(&b)).unwrap(), vec![("camera-b".into(),b)]);
-        assert!(pending_sources(&db, Some("another gallery device")).unwrap().is_empty());
-    }
 
     #[test]
     fn after_a_resource_error_unknown_files_precede_failed_and_already_saved_files() {
@@ -146,6 +57,7 @@ mod tests {
     }
 }
 
+#[cfg(test)]
 pub(in crate::ingest) fn collect<Guard>(
     root: &Path,
     windows_key: &str,

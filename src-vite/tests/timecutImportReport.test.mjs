@@ -10,7 +10,7 @@ import { renderToString } from 'vue/server-renderer';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const messages = { 'zh-CN': JSON.parse(fs.readFileSync(new URL('../src/locales/zh-CN.json', import.meta.url), 'utf8')) };
 const started = Date.UTC(2026, 0, 1);
-let server, Report;
+let server, Report, PhoneStatus;
 
 before(async () => {
   const memory = new Map();
@@ -21,6 +21,7 @@ before(async () => {
   };
   server = await createServer({ root, server: { middlewareMode: true, hmr: false }, appType: 'custom', logLevel: 'error' });
   Report = (await server.ssrLoadModule('/src/components/TimecutImportReport.vue')).default;
+  PhoneStatus = (await server.ssrLoadModule('/src/components/TimecutPhoneStatus.vue')).default;
 });
 after(async () => { await server?.close(); });
 
@@ -30,6 +31,40 @@ async function render(state, busy = false, liveRelease = false) {
   app.use(createI18n({ legacy: false, locale: 'zh-CN', messages }));
   return renderToString(app);
 }
+
+test('Apple camera completion stays visible with unresolved Windows exports', async () => {
+  const report = {
+    phone_channel: 'apple_camera', safe_at: started, previous_backup: true, skipped: 19,
+    windows_export: { listed: 22, checked: 14, complete: false, issues: ['测试文件读取中断'] },
+  };
+  const app = createSSRApp({ render: () => h(PhoneStatus, { report, connected: true }) });
+  app.use(createI18n({ legacy: false, locale: 'zh-CN', messages }));
+  const banner = await renderToString(app);
+  assert.match(banner, /Apple 相机原件已收齐/);
+  assert.match(banner, /本次没有新增/);
+  assert.match(banner, /Windows 导出已核对 14 \/ 22 项，剩余 8 项待核对/);
+  assert.doesNotMatch(banner, /可以拔线|手机传输未完成/);
+  const details = await render(report);
+  assert.match(details, /Apple 相机原件已收齐/);
+  assert.match(details, /测试文件读取中断/);
+});
+
+test('the transfer summary keeps completion visible and identifies a zero-addition reconnect', async () => {
+  const report = ref({ previous_backup: true, total_received: 0, added: 0, skipped: 19, safe_at: started });
+  const app = createSSRApp({
+    render: () => h(PhoneStatus, { report: report.value, connected: true }),
+  });
+  app.use(createI18n({ legacy: false, locale: 'zh-CN', messages }));
+  const status = await renderToString(app);
+  assert.match(status, /传输完成/);
+  assert.match(status, /已核对 19 份本地备份，本次没有新增/);
+  assert.doesNotMatch(status, /可以拔线/);
+  report.value = { previous_backup: true, total_received: 19, skipped: 0 };
+  const pending = await renderToString(app);
+  assert.match(pending, /等待完成传输核对/);
+  assert.match(pending, /本轮新收 19 份/);
+  assert.doesNotMatch(pending, /传输完成|可以拔线/);
+});
 
 test('a directory outage reports direct lookups and distinguishes them from a complete camera list', async () => {
   const native = { listed: 1, matched: 1, copied: 1, saved_receipts: 2551, direct_attempts: 2, direct_received: 1 };

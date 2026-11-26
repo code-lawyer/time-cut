@@ -38,7 +38,8 @@ pub(super) fn initialize(db: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS phone_inbox_size ON phone_inbox(size,digest);
         CREATE TABLE IF NOT EXISTS phone_local_retries(
         inbox_id INTEGER PRIMARY KEY,source TEXT NOT NULL,family TEXT NOT NULL,priority INTEGER NOT NULL,
-        retry_at INTEGER NOT NULL,error TEXT NOT NULL);
+        retry_at INTEGER NOT NULL,error TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,
+        stopped INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS phone_local_retry_family ON phone_local_retries(source,family,priority);
         CREATE TABLE IF NOT EXISTS phone_preserved_blobs(blob TEXT PRIMARY KEY) WITHOUT ROWID;
         CREATE TRIGGER IF NOT EXISTS phone_inbox_repaired AFTER UPDATE OF blob,archive_path ON phone_inbox
@@ -64,8 +65,28 @@ pub(super) fn initialize(db: &Connection) -> Result<()> {
         PRIMARY KEY(run_id,source,entry,version)) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS phone_directories(source TEXT NOT NULL,path TEXT NOT NULL,completed INTEGER NOT NULL,
         PRIMARY KEY(source,path)) WITHOUT ROWID;")?;
+    ensure_retry_limits(db)?;
     super::inventory::initialize(db)
 }
+
+fn ensure_retry_limits(db: &Connection) -> Result<()> {
+    let ready: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('phone_local_retries') WHERE name='stopped')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !ready {
+        db.execute_batch(
+            "ALTER TABLE phone_local_retries ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE phone_local_retries ADD COLUMN stopped INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    Ok(())
+}
+
+/// A damaged receipt is retried once a minute. After this many failures it stays
+/// visible and waits for a replacement receipt instead of reading the file forever.
+const LOCAL_RETRY_LIMIT: i64 = 5;
 
 #[derive(Clone)]
 struct Location {
@@ -363,6 +384,7 @@ pub(super) fn receive_checked(
     let db = &archive.db;
     let entry = item.relative.to_string_lossy();
     let version = item.version.as_deref().unwrap_or("");
+    let windows_export = source.album_scope_version() == Some(super::archive::APPLE_EXPORT_SCOPE);
     // A WPD display path can identify several different originals, even at identical sizes and dates.
     let candidates = db.prepare_cached("SELECT digest,blob,archive_path,version FROM phone_inbox
             WHERE source=?1 AND entry=?2 AND (?3 IS NULL OR size=?3)
@@ -433,12 +455,16 @@ pub(super) fn receive_checked(
         if recovery.wants_reference(&payload.digest, item.size) {
             recovery.matched(&payload.digest);
         }
+        if windows_export {
+            db.execute("UPDATE phone_inbox SET released=1 WHERE source=? AND entry=? AND version=? AND digest=? AND size=?",
+                params![source.identity(),entry,version,payload.digest,size])?;
+        }
         db.execute("UPDATE phone_runs SET compared=compared+? WHERE id=?", params![size, run])?;
         return Ok(Received { digest: payload.digest, bytes: 0, compared: size,
             path: payload.location.path(&archive.root)?, size });
     }
     if source_checksum.is_none()
-        && (same_version_changed || recovery.required || (recovery.confirm_unrecognized && !recognized))
+        && (same_version_changed || recovery.required || ((windows_export || recovery.confirm_unrecognized) && !recognized))
     {
         transfer::confirm(source, item, size, &payload.digest, |n| progress(n, ReadPhase::Confirm))?;
         compared += size;
@@ -451,12 +477,15 @@ pub(super) fn receive_checked(
     let tx = db.unchecked_transaction()?;
     // Replace a matching but missing/damaged backing file on repair. Other receipts
     // sharing that file are safely revalidated when visited or before local filing.
-    tx.execute("INSERT INTO phone_inbox(source,entry,version,digest,size,modified,priority,blob,archive_path,run_id)
-        VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source,entry,version,digest) DO UPDATE SET
+    // A verified Apple export item can be filed on its own when another
+    // Windows stream interrupts the inventory. Completion still needs the manifest.
+    tx.execute("INSERT INTO phone_inbox(source,entry,version,digest,size,modified,priority,blob,archive_path,run_id,released)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source,entry,version,digest) DO UPDATE SET
         blob=excluded.blob,archive_path=excluded.archive_path,size=excluded.size,
+        released=MAX(phone_inbox.released,excluded.released),
         run_id=CASE WHEN phone_inbox.released=0 THEN excluded.run_id ELSE phone_inbox.run_id END",
         params![source.identity(),entry,version,payload.digest,size,item.modified.map(stored_time),
-            if extension(&item.relative) == "xmp" {2} else {ordered(&item.relative).0},location.blob,location.archived,run])?;
+            if extension(&item.relative) == "xmp" {2} else {ordered(&item.relative).0},location.blob,location.archived,run,windows_export])?;
     tx.execute(
         "UPDATE phone_runs SET copies=copies+?,bytes=bytes+?,compared=compared+?,
         first_copy=CASE WHEN first_copy IS NULL AND ?>0 THEN ? ELSE first_copy END WHERE id=?",
@@ -519,20 +548,14 @@ pub(super) fn verify_supplements(archive: &Archive, run: i64) -> Result<bool> {
 
 pub(super) fn verify_supplement_files(archive: &Archive, run: i64) -> Result<bool> {
     let mut q = archive.db.prepare(
-        "SELECT i.blob,i.archive_path,i.digest,n.size,n.source FROM phone_native_items n
-         LEFT JOIN phone_inbox i ON i.source=n.source AND i.run_id=n.run_id AND i.entry=n.entry
-           AND i.version=n.version AND i.digest=n.digest AND i.size=n.size AND i.released=0 AND n.conflict=0
-         WHERE n.run_id=?",
+        "SELECT CASE WHEN conflict=0 THEN digest END,size,source FROM phone_native_items WHERE run_id=?",
     )?;
     let mut rows = q.query([run])?;
     while let Some(row) = rows.next()? {
-        let size: u64 = row.get(3)?;
-        if let Some(digest) = row.get::<_,Option<String>>(2)? {
-            let path = Location { blob: row.get(0)?, archived: row.get(1)? }.path(&archive.root)?;
-            if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && m.len() == size)
-                && verified_local(archive, &path, &digest)? { continue; }
-        }
-        let source: String = row.get(4)?;
+        let size: u64 = row.get(1)?;
+        if let Some(digest) = row.get::<_,Option<String>>(0)?
+            && fingerprints::by_digest(archive, size, &digest)?.is_some() { continue; }
+        let source: String = row.get(2)?;
         let tx = archive.db.unchecked_transaction()?;
         tx.execute("UPDATE phone_native_supplements SET checked_at=NULL WHERE run_id=? AND source=?",
             params![run,source])?;
@@ -550,7 +573,8 @@ pub(super) fn has_due_filing(db: &Connection) -> Result<bool> {
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='phone_local_retries')", [], |r| r.get(0))?;
     if !initialized { return Ok(true); }
     Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM phone_inbox i WHERE i.released=1
-        AND NOT EXISTS(SELECT 1 FROM phone_local_retries t WHERE t.inbox_id=i.id AND t.retry_at>unixepoch()))",
+        AND NOT EXISTS(SELECT 1 FROM phone_local_retries t WHERE t.inbox_id=i.id
+            AND (t.stopped<>0 OR t.retry_at>unixepoch())))",
         [], |r| r.get(0))?)
 }
 
@@ -577,7 +601,7 @@ pub(super) fn file_next_at(archive: &mut Archive, pass_started: i64) -> Result<O
         .query_row(
             "SELECT id,source,entry,version,digest,size,modified,blob,archive_path
         FROM phone_inbox i WHERE released=1 AND NOT EXISTS(
-            SELECT 1 FROM phone_local_retries t WHERE t.inbox_id=i.id AND t.retry_at>?)
+            SELECT 1 FROM phone_local_retries t WHERE t.inbox_id=i.id AND (t.stopped<>0 OR t.retry_at>?))
         ORDER BY priority,id LIMIT 1",
             [pass_started],
             |r| {
@@ -628,8 +652,20 @@ pub(super) fn file_next_at(archive: &mut Archive, pass_started: i64) -> Result<O
     let (data, added) = match filed {
         Ok(result) => result,
         Err(error) => {
-            archive.db.execute("INSERT OR REPLACE INTO phone_local_retries(inbox_id,source,family,priority,retry_at,error)
-                VALUES(?,?,?,?,unixepoch()+60,?)", params![id,source,family,priority,format!("{entry}：{error}")])?;
+            let attempts = archive.db.query_row(
+                "SELECT attempts FROM phone_local_retries WHERE inbox_id=?",
+                [id], |row| row.get::<_, i64>(0),
+            ).optional()?.unwrap_or(0) + 1;
+            let stopped = attempts >= LOCAL_RETRY_LIMIT;
+            let message = if stopped {
+                format!("{entry}：{error}。已停止自动重试")
+            } else {
+                format!("{entry}：{error}")
+            };
+            archive.db.execute("INSERT OR REPLACE INTO phone_local_retries
+                (inbox_id,source,family,priority,retry_at,error,attempts,stopped)
+                VALUES(?,?,?,?,CASE WHEN ?5 THEN 0 ELSE unixepoch()+60 END,?,?,?)",
+                params![id, source, family, priority, stopped, message, attempts, stopped])?;
             return Ok(Some(Filed::Deferred));
         }
     };

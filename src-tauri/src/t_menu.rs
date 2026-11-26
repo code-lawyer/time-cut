@@ -10,10 +10,8 @@ pub fn install_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let preferences_item = MenuItemBuilder::with_id("preferences", "Preferences…")
         .accelerator("CmdOrCtrl+,")
         .build(app)?;
-    let about_item =
-        MenuItemBuilder::with_id("about", format!("About {}", app.package_info().name))
-            .build(app)?;
-    let home_item = MenuItemBuilder::with_id("help_homepage", "Lap Home").build(app)?;
+    let about_item = MenuItemBuilder::with_id("about", "About Time-cut").build(app)?;
+    let home_item = MenuItemBuilder::with_id("help_homepage", "Time-cut Home").build(app)?;
     let release_notes_item =
         MenuItemBuilder::with_id("help_release_notes", "Release Notes").build(app)?;
     let readme_item = MenuItemBuilder::with_id("help_readme", "README").build(app)?;
@@ -28,7 +26,7 @@ pub fn install_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .accelerator("CmdOrCtrl+A")
         .build(app)?;
 
-    let app_submenu = SubmenuBuilder::new(app, app.package_info().name.clone())
+    let app_submenu = SubmenuBuilder::new(app, "Time-cut")
         .item(&about_item)
         .separator()
         .item(&preferences_item)
@@ -100,32 +98,31 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
         }
         "help_homepage" => {
             let _ = opener::open(
-                option_env!("CARGO_PKG_HOMEPAGE").unwrap_or("https://julyx10.github.io/lap"),
+                option_env!("CARGO_PKG_HOMEPAGE").unwrap_or("https://github.com/code-lawyer/time-cut"),
             );
         }
         "help_release_notes" => {
             let _ = opener::open(format!(
-                "{}/guide/release-notes/v{}.html",
-                option_env!("CARGO_PKG_HOMEPAGE").unwrap_or("https://julyx10.github.io/lap"),
-                env!("CARGO_PKG_VERSION")
+                "{}/releases",
+                option_env!("CARGO_PKG_REPOSITORY").unwrap_or("https://github.com/code-lawyer/time-cut")
             ));
         }
         "help_readme" => {
             let _ = opener::open(format!(
                 "{}/blob/main/README.md",
-                option_env!("CARGO_PKG_REPOSITORY").unwrap_or("https://github.com/julyx10/lap")
+                option_env!("CARGO_PKG_REPOSITORY").unwrap_or("https://github.com/code-lawyer/time-cut")
             ));
         }
         "help_privacy" => {
             let _ = opener::open(format!(
                 "{}/blob/main/PRIVACY.md",
-                option_env!("CARGO_PKG_REPOSITORY").unwrap_or("https://github.com/julyx10/lap")
+                option_env!("CARGO_PKG_REPOSITORY").unwrap_or("https://github.com/code-lawyer/time-cut")
             ));
         }
         "help_report_issue" => {
             let _ = opener::open(format!(
                 "{}/issues",
-                option_env!("CARGO_PKG_REPOSITORY").unwrap_or("https://github.com/julyx10/lap")
+                option_env!("CARGO_PKG_REPOSITORY").unwrap_or("https://github.com/code-lawyer/time-cut")
             ));
         }
         _ => {}

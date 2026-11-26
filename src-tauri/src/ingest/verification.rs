@@ -22,6 +22,8 @@ fn single_phone(archive: &Connection) -> Result<String> {
     if sources.len() == 1 { return Ok(sources.into_iter().next().unwrap()); }
     let windows: Vec<_> = sources.iter().filter(|s|s.starts_with("wpd:")).collect();
     let [windows] = windows.as_slice() else { return Err(ambiguous.into()) };
+    let mut camera = None;
+    let scoped_runs = has("phone_runs")? && has("phone_run_scopes")?;
     for native in sources.iter().filter(|s|s.starts_with("afc:")) {
         let supplement: bool = has("phone_native_supplements")? && has("phone_runs")? && archive.query_row(
             "SELECT EXISTS(SELECT 1 FROM phone_native_supplements n JOIN phone_runs r ON n.run_id=r.id
@@ -30,8 +32,15 @@ fn single_phone(archive: &Connection) -> Result<String> {
             "SELECT EXISTS(SELECT 1 FROM phone_camera_roots WHERE source=?1 AND (serial=?2 OR udid=?2))",
             params![native,&windows[4..]], |r|r.get(0))?;
         if !supplement && !same_camera { return Err(ambiguous.into()); }
+        if same_camera && scoped_runs && archive.query_row(
+            "SELECT EXISTS(SELECT 1 FROM phone_runs r JOIN phone_run_scopes s ON s.run_id=r.id
+             WHERE r.source=? AND s.scope=? AND r.safe_at IS NOT NULL)",
+            params![native,super::afc::CAMERA_SCOPE], |r| r.get::<_,bool>(0))?
+        {
+            if camera.replace(native).is_some() { return Err(ambiguous.into()); }
+        }
     }
-    Ok((*windows).clone())
+    Ok(camera.unwrap_or(windows).clone())
 }
 
 #[cfg(all(windows, test))]
@@ -46,6 +55,10 @@ fn an_acceptance_rescan_can_arm_an_apple_only_gallery_and_rejects_unrelated_devi
     crate::ingest::inbox::initialize(&db).unwrap();
     db.execute("INSERT INTO phone_camera_roots VALUES('afc:one','SERIAL','one')",[]).unwrap();
     assert_eq!(single_phone(&db).unwrap(),"wpd:serial");
+    db.execute("INSERT INTO phone_runs(source,started,safe_at) VALUES('afc:one',1,2)",[]).unwrap();
+    db.execute("INSERT INTO phone_run_scopes VALUES(?,?)",
+        params![db.last_insert_rowid(),super::afc::CAMERA_SCOPE]).unwrap();
+    assert_eq!(single_phone(&db).unwrap(),"afc:one");
     db.execute("INSERT INTO sources VALUES('afc:another')",[]).unwrap();
     assert!(single_phone(&db).is_err());
 }

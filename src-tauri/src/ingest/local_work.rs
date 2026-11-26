@@ -1,4 +1,4 @@
-use super::{Archive, Report, Result, Target, View, catalog, inbox, recent, request_index};
+use super::{Archive, PhoneChannel, Report, Result, Target, View, archive::APPLE_EXPORT_SCOPE, catalog, inbox, recent, request_index};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{
     collections::HashMap,
@@ -72,7 +72,8 @@ fn reconcile_saved_lists(
                 super::inventory::restore(&archive.db, run, &mut report, false)?;
                 super::record_history(control, &report)?;
                 let mut live = view.lock().unwrap();
-                if live.target.as_ref().is_some_and(|active| active.library == dest.library && active.album == dest.album) {
+                if current_album_report(&live, dest, live.report.phone_channel == Some(PhoneChannel::AppleCamera)
+                    && live.report.safe_at.is_some()) {
                     live.report = report;
                 }
                 live.recent = recent(control)?;
@@ -157,17 +158,25 @@ fn process_album(
     if let Err(error) = reconcile_saved_lists(&probe, control, &dest, &label, view, checked) {
         view.lock().unwrap().device_error = format!("暂时无法核对本机接收记录。{error}");
     }
-    if let Some((safe_at,source,started,count,inventory))=probe.query_row(
-        "SELECT safe_at,source,started,discovered,inventory FROM phone_runs WHERE safe_at IS NOT NULL ORDER BY safe_at DESC LIMIT 1",
-        [],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,u64>(3)?,r.get::<_,String>(4)?))).optional()? {
+    let selected = {
+        let live = view.lock().unwrap();
+        current_album_report(&live, &dest, false).then_some(live.report.safe_at).flatten()
+    };
+    if let Some((run,safe_at,source,started,count,inventory))=probe.query_row(
+        "SELECT id,safe_at,source,started,COALESCE(discovered,0),inventory FROM phone_runs r
+         WHERE safe_at IS NOT NULL OR EXISTS(SELECT 1 FROM phone_inbox i WHERE i.run_id=r.id AND i.released=1)
+         ORDER BY (safe_at=?1) DESC,safe_at DESC,started DESC LIMIT 1",
+        [selected],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?,
+            r.get::<_,u64>(4)?,r.get::<_,Option<String>>(5)?))).optional()? {
         let remaining=inbox::pending_local(&probe)?;
         let open=probe.query_row("SELECT EXISTS(SELECT 1 FROM phone_runs WHERE safe_at IS NULL)",[],|r|r.get::<_,bool>(0))?;
-        if remaining==0 && open {return Ok(());}
+        if remaining==0 && open && selected != safe_at {return Ok(());}
         if remaining>0 && !inbox::has_due_filing(&probe)? {return Ok(());}
         drop(probe);
         let publish = |report: &Report, busy: bool| {
             let mut live = view.lock().unwrap();
-            if current_album_report(&live, &dest, open) {
+            let same_run = live.report.device_key == report.device_key && live.report.capture_started_at == report.capture_started_at;
+            if current_album_report(&live, &dest, open && !same_run) {
                 #[cfg(windows)]
                 if let Some(tray) = app.tray_by_id("timecut") {
                     if report.local_errors > 0 && (live.report.local_errors == 0 || live.report.safe_at != report.safe_at) {
@@ -180,12 +189,18 @@ fn process_album(
                 live.report = report.clone();
             }
         };
-        let raw=control.query_row("SELECT data FROM history WHERE json_extract(data,'$.safe_at')=? ORDER BY id DESC LIMIT 1",
-            [safe_at],|r|r.get::<_,String>(0)).optional()?;
-        let mut report=if let Some(raw)=raw {serde_json::from_str(&raw)?} else {
-            Report{source:label,phone:true,capture:true,safe_at:Some(safe_at),capture_started_at:Some(started),
-                discovered:count,device_key:Some(super::verification::device_key(&source)),inventory:Some(inventory),..Default::default()}
+        let key = super::verification::device_key(&source);
+        let saved=control.query_row("SELECT id,data FROM history WHERE json_extract(data,'$.safe_at') IS ?
+            AND json_extract(data,'$.capture_started_at')=? AND json_extract(data,'$.device_key')=? ORDER BY id DESC LIMIT 1",
+            params![safe_at,started,key],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?))).optional()?;
+        let mut report=if let Some((_,raw))=&saved {serde_json::from_str(raw)?} else {
+            let phone_channel = if source.starts_with("afc:") { Some(PhoneChannel::AppleCamera) }
+                else if safe_at.is_none() { Some(PhoneChannel::WindowsExport) } else { None };
+            Report{source:label,phone:true,capture:true,safe_at,capture_started_at:Some(started),phone_channel,
+                album_scope:(safe_at.is_none() && source.starts_with("wpd:")).then(|| APPLE_EXPORT_SCOPE.into()),
+                discovered:count,device_key:Some(key),inventory,..Default::default()}
         };
+        let transfer_phase = report.phase.clone();
         report.local_pending=remaining;
         let mut only_new_failures = false;
         if remaining>0 {
@@ -217,7 +232,7 @@ fn process_album(
                 }
             }
             (report.local_filed,report.local_duplicates)=archive.db.query_row(
-                "SELECT filed,duplicates FROM phone_runs WHERE source=? AND safe_at=?",params![source,safe_at],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                "SELECT filed,duplicates FROM phone_runs WHERE id=?",[run],|r|Ok((r.get(0)?,r.get(1)?)))?;
             (report.local_errors,report.local_error) = inbox::local_errors(&archive.db)?;
             only_new_failures = fresh_marker && report.local_pending == remaining;
         } else {
@@ -230,9 +245,17 @@ fn process_album(
         let needs_index = interrupted && !only_new_failures;
         if needs_index {request_index(&tx,&dest.library,dest.album)?;}
         if !open && report.local_pending == 0 {tx.execute("DELETE FROM phone_work WHERE library=? AND album=?",params![dest.library,dest.album])?;}
-        report.phase=if report.local_pending == 0 { "本地原件整理完成" } else { "本地收件待修复" }.into();
+        report.phase=if report.local_pending > 0 {
+            "本地收件待修复".into()
+        } else if report.safe_at.is_none() {
+            transfer_phase
+        } else {
+            "本地原件整理完成".into()
+        };
         let raw=serde_json::to_string(&report)?;
-        if tx.execute("UPDATE history SET data=? WHERE json_extract(data,'$.safe_at')=?",params![raw,safe_at])?==0 {
+        if let Some((id,_))=saved {
+            tx.execute("UPDATE history SET data=? WHERE id=?",params![raw,id])?;
+        } else {
             tx.execute("INSERT INTO history(data) VALUES(?)",[raw])?;
         }
         tx.commit()?;

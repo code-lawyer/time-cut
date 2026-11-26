@@ -310,6 +310,7 @@ pub async fn get_thumbnail_cache_migration_count() -> Result<u64, crate::t_cache
 
 #[tauri::command]
 pub async fn change_thumbnail_cache_location(
+    app_handle: tauri::AppHandle,
     new_dir: Option<String>,
     operation_id: String,
     allow_missing_source: Option<bool>,
@@ -318,10 +319,16 @@ pub async fn change_thumbnail_cache_location(
 ) -> Result<crate::t_cache_storage::CacheChangeResult, crate::t_cache_storage::CacheChangeError> {
     ensure_db_storage_change_allowed(&status_state)?;
     let operation = crate::t_cache_storage::MigrationOperation::begin(operation_id)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let _guard = cache_migration_library_guard(&operation.cancellation)?;
         crate::t_cache_storage::change(new_dir, allow_missing_source.unwrap_or(false), &operation.cancellation, |progress| { let _ = on_progress.send(progress); })
-    }).await.map_err(|e| e.to_string())?
+    }).await.map_err(|e| e.to_string())??;
+    if result.custom {
+        t_utils::authorize_directory_scope(&app_handle, &result.path).map_err(|error| {
+            crate::t_cache_storage::CacheChangeError::from(error)
+        })?;
+    }
+    Ok(result)
 }
 
 fn cache_migration_library_guard(

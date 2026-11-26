@@ -25,6 +25,7 @@ use std::{
 use tokio::runtime::Runtime;
 
 const CAMERA: &str = "DCIM";
+pub(super) const CAMERA_SCOPE: &str = "apple-afc-dcim-v1";
 const REQUEST: Duration = Duration::from_secs(20);
 
 fn runtime() -> Result<Rc<Runtime>> {
@@ -170,7 +171,7 @@ fn same_hardware(id: &str, serial: &str, udid: &str) -> bool {
 }
 
 impl Phone {
-    fn open(rt: Rc<Runtime>, device: &UsbmuxdDevice, expected: &[&str]) -> Result<Option<Self>> {
+    fn open(rt: Rc<Runtime>, device: &UsbmuxdDevice) -> Result<Self> {
         let provider = device.to_provider(address(), "Time-cut");
         let serial = wait(&rt, REQUEST, async {
             let mut lockdown = LockdownClient::connect(&provider).await?;
@@ -183,9 +184,6 @@ impl Phone {
         .filter(|s| !s.is_empty())
         .ok_or("Apple 设备未提供硬件序列号")?
         .to_owned();
-        if !expected.is_empty() && !expected.iter().any(|id| same_hardware(id, &serial, &device.udid)) {
-            return Ok(None);
-        }
         let client = wait(&rt, REQUEST, AfcClient::connect(&provider))?;
         let phone = Self {
             rt,
@@ -201,7 +199,7 @@ impl Phone {
         {
             return Err("iPhone 尚未提供原件目录 DCIM".into());
         }
-        Ok(Some(phone))
+        Ok(phone)
     }
 
     // The explicit diagnostic must never pick an arbitrary phone on a multi-device computer.
@@ -215,7 +213,7 @@ impl Phone {
             )
             .into());
         };
-        Self::open(rt, device, &[])?.ok_or_else(|| "无法确定 Apple 原件来源".into())
+        Self::open(rt, device)
     }
 
     fn info(&self, path: &str) -> Result<HashMap<String, String>> {
@@ -327,6 +325,11 @@ impl Source for Phone {
         &self.identity
     }
     fn paired_camera_serial(&self) -> Option<&str> { Some(&self.serial) }
+    fn album_scope_version(&self) -> Option<&'static str> { Some(CAMERA_SCOPE) }
+    fn album_path_in_scope(&self, path: &Path) -> bool {
+        path.starts_with(CAMERA) && path.parent().is_some_and(|parent| parent.starts_with(CAMERA))
+            && remote_path(path).is_ok()
+    }
     fn saved_files(&self) -> Option<&dyn SavedFiles> { Some(self) }
     fn visit(&self, emit: &mut dyn FnMut(ScanEvent) -> Result<()>) -> Result<()> {
         self.walk(None, emit)

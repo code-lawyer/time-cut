@@ -198,6 +198,14 @@ pub(super) fn receive<Guard>(
         };
         inbox::initialize(&archive.db)?;
         let db = &archive.db;
+        report.previous_backup = db.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM phone_runs WHERE source=?1 AND safe_at IS NOT NULL
+                UNION ALL SELECT 1 FROM sources WHERE source=?1
+            )",
+            [key],
+            |row| row.get(0),
+        )?;
         if let Some(serial) = source.paired_camera_serial() {
             let udid = key.strip_prefix("afc:").filter(|s| !s.is_empty()).ok_or("无法确定 Apple 原件来源")?;
             if serial.is_empty() { return Err("Apple 设备未提供硬件序列号".into()); }
@@ -205,7 +213,7 @@ pub(super) fn receive<Guard>(
             let consistent: bool = db.query_row("SELECT serial=? AND udid=? FROM phone_camera_roots WHERE source=?",
                 params![serial,udid,key],|r|r.get(0))?;
             if !consistent { return Err("Apple 原件来源的硬件身份发生变化".into()); }
-        } else if let Some(id) = key.strip_prefix("wpd:") {
+        } else if scope != Some(super::archive::APPLE_EXPORT_SCOPE) && let Some(id) = key.strip_prefix("wpd:") {
             // A Windows interface can appear halfway through a camera-only capture.
             // Resume the original inventory before opening a competing Windows run.
             let camera_open: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM phone_camera_roots c
@@ -707,6 +715,7 @@ pub(super) fn receive<Guard>(
         )?;
         report.local_pending = inbox::pending_local(&tx)?;
         inventory::compact_folder_checkpoints(&tx, key)?;
+        inventory::retain_latest_inventory(&tx, key)?;
         tx.commit()?;
         report.safe_at = Some(safe_at);
         report.inventory = Some(digest);

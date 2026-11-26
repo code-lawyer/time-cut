@@ -198,7 +198,7 @@ async fn run(provider: Provider, executable: &Path, directory: &Path) -> Result<
                     "--permission-mode",
                     "dontAsk",
                     "--max-turns",
-                    "4",
+                    "2",
                     "--output-format",
                     "json",
                     "--json-schema",

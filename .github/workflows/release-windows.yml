@@ -20,9 +20,6 @@ jobs:
       ORT_PREFER_DYNAMIC_LINK: '1'
       LAP_JPEG_NO_SIMD: '1'
       __CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT: '1'
-      CARGO_PROFILE_RELEASE_LTO: 'false'
-      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
-      CARGO_PROFILE_RELEASE_OPT_LEVEL: '2'
       VITE_TIMECUT_REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
     defaults:
       run:

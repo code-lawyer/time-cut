@@ -650,6 +650,9 @@ fn album_capture_ignores_private_and_unrelated_branches() {
         row("Phone/DCIM/Camera/keep.jpg", Kind::File(b"camera", SizeHint::Object)),
         row("Phone/DCIM/Camera/.hidden.jpg", Kind::File(b"hidden", SizeHint::Object)),
         row("Phone/DCIM/.thumbnails", Kind::ReadFaultFolder),
+        row("Phone/202402_b", Kind::Folder),
+        row("Phone/202402_b/iphone.jpg", Kind::File(b"iphone", SizeHint::Object)),
+        row("Phone/202413__", Kind::ReadFaultFolder),
         row("Phone/Pictures", Kind::Folder),
         row("Phone/Pictures/screenshots.png", Kind::File(b"screenshot", SizeHint::Object)),
         row("Phone/Movies", Kind::Folder),
@@ -662,7 +665,7 @@ fn album_capture_ignores_private_and_unrelated_branches() {
     ];
     for (folder, scope, expected) in [
         ("android", AlbumScope::Shared, 5),
-        ("apple", AlbumScope::Apple, 1),
+        ("apple", AlbumScope::Apple, 2),
     ] {
         let mut source = phone(1, rows.clone(), None, opened.clone());
         source.album_scope = scope;
@@ -682,6 +685,35 @@ fn album_capture_ignores_private_and_unrelated_branches() {
     assert!(!reads.iter().any(|name| {
         ["outside", "loose", ".hidden"].iter().any(|&part| name.contains(part))
     }));
+}
+
+#[test]
+fn iphone_month_folders_reconnect_and_reuse_existing_originals() {
+    let _apartment = Apartment::new().unwrap();
+    let sandbox = Sandbox::new();
+    let archive = sandbox.dir("archive");
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let entries = vec![
+        row("Internal Storage", Kind::Storage),
+        row("Internal Storage/202402__", Kind::Folder),
+        row("Internal Storage/202402__/IMG_0001.HEIC", Kind::File(b"photo", SizeHint::Object)),
+        row("Internal Storage/202402__/IMG_0001.MOV", Kind::File(b"live", SizeHint::Object)),
+    ];
+    let capture = |session| {
+        let mut source = phone(session, entries.clone(), None, reads.clone());
+        source.album_scope = AlbumScope::Apple;
+        crate::ingest::capture::receive(
+            &archive, "iPhone", |_| Ok(0), || Ok(Box::new(source)),
+            |_| {}, || Ok(()), || Ok(()),
+        )
+    };
+    let first = capture(1);
+    assert!(first.safe_at.is_some(), "{:?}", first.issues);
+    assert_eq!((first.added, first.skipped, first.previous_backup), (2, 0, false));
+    let repeat = capture(2);
+    assert!(repeat.safe_at.is_some(), "{:?}", repeat.issues);
+    assert_eq!((repeat.added, repeat.skipped, repeat.previous_backup), (0, 2, true));
+    assert_eq!(repeat.received_bytes, 0);
 }
 
 #[test]

@@ -590,6 +590,50 @@ pub(super) fn publish(
     Ok(())
 }
 
+/// Keep item-level evidence for the newest completed import of this phone and
+/// for every open run. Older completed runs keep their summary and scope.
+/// Original-file observations from those rounds move onto the retained list.
+pub(super) fn retain_latest_inventory(db: &Connection, source: &str) -> Result<()> {
+    let latest: Option<i64> = db.query_row(
+        "SELECT id FROM phone_runs WHERE source=?1 AND safe_at IS NOT NULL
+         ORDER BY safe_at DESC, id DESC LIMIT 1",
+        [source],
+        |row| row.get(0),
+    ).optional()?;
+    let Some(latest) = latest else { return Ok(()); };
+    db.execute(
+        "INSERT OR IGNORE INTO phone_usb_original_listings(run_id,entry,version,size,modified)
+         SELECT ?1, entry, version, size, modified FROM phone_usb_original_listings
+         WHERE run_id IN (
+            SELECT id FROM phone_runs WHERE source=?2 AND safe_at IS NOT NULL AND id<>?1)",
+        params![latest, source],
+    )?;
+    for table in [
+        "phone_list_items",
+        "phone_manifest",
+        "phone_lists",
+        "phone_folder_items",
+        "phone_list_folders",
+        "phone_peak_folders",
+        "phone_item_retries",
+        "phone_returned_data",
+        "phone_usb_original_listings",
+        "phone_native_items",
+        "phone_native_supplements",
+        "phone_native_rechecks",
+        "phone_native_pickups",
+    ] {
+        db.execute(
+            &format!(
+                "DELETE FROM {table} WHERE run_id IN (
+                    SELECT id FROM phone_runs WHERE source=?1 AND safe_at IS NOT NULL AND id<>?2)"
+            ),
+            params![source, latest],
+        )?;
+    }
+    Ok(())
+}
+
 /// Folder checkpoints serve interrupted scans. Once a run is released, the
 /// complete list and its content manifest are the permanent item-level evidence.
 /// Remove only checkpoint rows also present in a verified final list. Retain

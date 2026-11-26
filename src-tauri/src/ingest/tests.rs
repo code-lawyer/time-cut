@@ -637,10 +637,11 @@ fn iphone_filesystem_checksum_reuses_a_differently_named_wpd_receipt_without_usb
 }
 
 #[cfg(windows)]
-struct WindowsCamera(DeviceFixture);
+struct WindowsCamera(DeviceFixture, Option<&'static str>);
 #[cfg(windows)]
 impl Source for WindowsCamera {
     fn identity(&self) -> &str { "wpd:HARDWARE-42" }
+    fn album_scope_version(&self) -> Option<&'static str> { self.1 }
     fn visit(&self, emit: &mut dyn FnMut(ScanEvent) -> Result<()>) -> Result<()> { self.0.visit(emit) }
     fn reader(&self, item: &Item) -> Result<Box<dyn Read>> { self.0.reader(item) }
 }
@@ -656,7 +657,7 @@ fn camera_only_capture_can_resume_file_and_repeat_when_the_windows_interface_arr
     let partial = capture(phone(1,1));
     assert_eq!(partial.added,1);
     assert!(partial.safe_at.is_none());
-    let windows=capture(Box::new(WindowsCamera(fixture(2,catalogue,None))));
+    let windows=capture(Box::new(WindowsCamera(fixture(2,catalogue,None), None)));
     assert!(windows.safe_at.is_none());
     assert_eq!(windows.phase.as_str(),"等待 Apple 原件目录");
     let complete=capture(phone(3,2));
@@ -677,11 +678,58 @@ fn camera_only_capture_can_resume_file_and_repeat_when_the_windows_interface_arr
 
 #[cfg(windows)]
 #[test]
+fn readable_iphone_exports_are_filed_without_completing_an_interrupted_export_inventory() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.dir("camera-and-export");
+    let capture = |source: Box<dyn Source>| super::capture::receive(
+        &root, "iPhone", |_| Ok(2), || Ok(source), |_| {}, || Ok(()), || Ok(()),
+    );
+    let native: &[(&str, &[u8])] = &[
+        ("DCIM/101APPLE/IMG_0001.HEIC", b"native photo"),
+        ("DCIM/101APPLE/IMG_0001.MOV", b"native movie"),
+    ];
+    let camera = |session, count| Box::new(ChecksumPhone {
+        phone: fixture(session, &native[..count], None),
+        stale_payload: None,
+    });
+    assert!(capture(camera(1, 1)).safe_at.is_none());
+
+    let export = WindowsCamera(fixture(2, &[
+        ("202601/IMG_0001.JPG", b"converted photo"),
+        ("202601/IMG_0001.MOV", b"advertised movie bytes"),
+    ], Some(1)), Some(super::archive::APPLE_EXPORT_SCOPE));
+    let windows = capture(Box::new(export));
+    assert!(windows.safe_at.is_none());
+    assert_eq!(windows.added, 1);
+    {
+        let mut archive = Archive::open(&root).unwrap();
+        assert!(super::inbox::file_next(&mut archive).unwrap().is_some());
+        assert!(super::inbox::file_next(&mut archive).unwrap().is_none());
+    }
+    assert_eq!(originals(&root).len(), 1);
+
+    let complete = capture(camera(3, 2));
+    assert!(complete.safe_at.is_some(), "{:?}", complete.issues);
+    {
+        let mut archive = Archive::open(&root).unwrap();
+        while super::inbox::file_next(&mut archive).unwrap().is_some() {}
+    }
+    assert_eq!(originals(&root).len(), 3);
+    let repeat = capture(camera(4, 2));
+    assert_eq!((repeat.added, repeat.skipped, repeat.failed), (0, 2, 0));
+    assert_eq!(repeat.inventory, complete.inventory);
+    let archive = Archive::open(&root).unwrap();
+    assert!(archive.db.query_row("SELECT safe_at IS NULL FROM phone_runs WHERE source='wpd:HARDWARE-42'",
+        [], |row| row.get::<_, bool>(0)).unwrap());
+}
+
+#[cfg(windows)]
+#[test]
 fn paired_camera_can_supplement_an_incomplete_windows_run_without_releasing_it_early() {
     let sandbox = Sandbox::new();
     let root = sandbox.dir("archive");
     let windows = |items: &[(&str, &[u8])]| super::capture::receive(
-        &root, "Test phone", |_| Ok(2), || Ok(Box::new(WindowsCamera(fixture(1,items,None)))),
+        &root, "Test phone", |_| Ok(2), || Ok(Box::new(WindowsCamera(fixture(1,items,None), None))),
         |_| {}, || Ok(()), || Ok(()),
     );
     let old = ("Camera/first.jpg", b"already saved".as_slice());
@@ -1067,6 +1115,74 @@ fn closed_folder_checkpoints_compact_only_when_the_final_manifest_confirms_the_i
     assert_eq!(db.query_row("SELECT COUNT(*) FROM phone_folder_items WHERE run_id=1 AND entry='DCIM/b.jpg'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
     assert_eq!(db.query_row("SELECT COUNT(*) FROM phone_manifest",[],|r|r.get::<_,i64>(0)).unwrap(),5);
     assert_eq!(db.query_row("SELECT COUNT(*) FROM phone_list_items",[],|r|r.get::<_,i64>(0)).unwrap(),5);
+}
+
+#[test]
+fn completed_inventories_keep_the_latest_verified_list_and_prior_original_observations() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    super::inbox::initialize(&db).unwrap();
+    db.execute_batch("INSERT INTO phone_runs(id,source,started,safe_at,discovered,inventory) VALUES
+        (1,'camera',1,10,2,'old'),(2,'camera',2,20,1,'new'),(3,'camera',3,NULL,0,NULL),(4,'other',1,10,1,'keep');
+        INSERT INTO phone_run_scopes VALUES(1,'dcim'),(2,'dcim');
+        INSERT INTO phone_lists VALUES(1,1,2),(2,2,1),(3,3,1),(4,4,1);
+        INSERT INTO phone_list_items VALUES
+        (1,1,'a.jpg','v',1,'t','h1'),(2,1,'b.jpg','v',1,'t','h2'),
+        (3,1,'open.jpg','v',1,'t',NULL),(4,1,'other.jpg','v',1,'t','h4');
+        INSERT INTO phone_manifest SELECT run_id,ordinal,entry,version,digest,size FROM phone_list_items
+            WHERE digest IS NOT NULL;
+        INSERT INTO phone_usb_original_listings VALUES
+        (1,'a.HEIC','v1',8,'t'),(2,'b.HEIC','v2',8,'t');
+        INSERT INTO phone_native_items VALUES(1,'afc:camera','a.HEIC','v1',8,'h',0);").unwrap();
+    super::inventory::retain_latest_inventory(&db, "camera").unwrap();
+    let count = |sql: &str| db.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+    assert_eq!(count("SELECT COUNT(*) FROM phone_runs"), 4);
+    assert_eq!(count("SELECT COUNT(*) FROM phone_run_scopes"), 2);
+    assert_eq!(count("SELECT COUNT(*) FROM phone_list_items WHERE run_id=1"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM phone_manifest WHERE run_id=1"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM phone_list_items WHERE run_id=2"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM phone_manifest WHERE run_id=2"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM phone_list_items WHERE run_id=3"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM phone_list_items WHERE run_id=4"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM phone_usb_original_listings WHERE run_id=1"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM phone_usb_original_listings WHERE entry='a.HEIC' AND run_id=2"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM phone_usb_original_listings WHERE entry='b.HEIC'"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM phone_native_items"), 0);
+}
+
+#[test]
+fn a_permanently_damaged_receipt_stops_retrying_and_keeps_its_error() {
+    use super::inbox::{self, Filed};
+    let temp = Sandbox::new();
+    let root = temp.dir("archive");
+    let mut archive = Archive::open(&root).unwrap();
+    super::inbox::initialize(&archive.db).unwrap();
+    let blob = uuid::Uuid::new_v4().to_string();
+    let inbox = root.join(".time-cut").join("inbox");
+    fs::create_dir_all(&inbox).unwrap();
+    fs::write(inbox.join(&blob), b"bad").unwrap();
+    archive.db.execute(
+        "INSERT INTO phone_inbox(source,entry,version,digest,size,priority,blob,released)
+         VALUES('wpd:phone','DCIM/a.jpg','v',?,3,0,?,1)",
+        rusqlite::params![blake3::hash(b"good").to_hex().to_string(), blob],
+    ).unwrap();
+    for expected in 1..=5 {
+        if expected > 1 {
+            archive.db.execute("UPDATE phone_local_retries SET retry_at=0 WHERE stopped=0", []).unwrap();
+        }
+        assert_eq!(inbox::file_next(&mut archive).unwrap(), Some(Filed::Deferred));
+        let (attempts, stopped): (i64, i64) = archive.db.query_row(
+            "SELECT attempts, stopped FROM phone_local_retries", [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!((attempts, stopped), (expected, i64::from(expected == 5)));
+    }
+    archive.db.execute("UPDATE phone_local_retries SET retry_at=0", []).unwrap();
+    assert_eq!(inbox::file_next(&mut archive).unwrap(), None);
+    assert!(!inbox::has_due_filing(&archive.db).unwrap());
+    let (errors, message) = inbox::local_errors(&archive.db).unwrap();
+    assert_eq!(errors, 1);
+    assert!(message.unwrap().contains("已停止自动重试"));
+    assert_eq!(fs::read(inbox.join(blob)).unwrap(), b"bad");
 }
 
 #[test]

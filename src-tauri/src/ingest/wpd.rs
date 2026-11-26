@@ -319,10 +319,11 @@ enum DirectoryLevel {
 }
 
 impl AlbumScope {
-    fn is_album_root(self, name: &str) -> bool {
+    fn is_album_root(self, parent: DirectoryLevel, name: &str) -> bool {
         name.eq_ignore_ascii_case("DCIM")
             || (self == Self::Shared
                 && (name.eq_ignore_ascii_case("Pictures") || name.eq_ignore_ascii_case("Movies")))
+            || (self == Self::Apple && parent == DirectoryLevel::Storage && apple_camera_folder(name))
     }
 
     fn child(self, parent: DirectoryLevel, path: &Path, storage: bool) -> Option<DirectoryLevel> {
@@ -336,7 +337,7 @@ impl AlbumScope {
         }
         match parent {
             DirectoryLevel::Device if storage => Some(DirectoryLevel::Storage),
-            DirectoryLevel::Device | DirectoryLevel::Storage if self.is_album_root(name) => {
+            DirectoryLevel::Device | DirectoryLevel::Storage if self.is_album_root(parent, name) => {
                 Some(DirectoryLevel::Album)
             }
             DirectoryLevel::Album if !storage => Some(DirectoryLevel::Album),
@@ -360,6 +361,18 @@ impl AlbumScope {
         self.includes_media(parent)
             && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| !name.starts_with('.'))
     }
+}
+
+// The iPhone photo interface can expose DCIM's month folders directly under Internal Storage.
+fn apple_camera_folder(name: &str) -> bool {
+    let Some((date, suffix)) = name.as_bytes().split_at_checked(6) else {
+        return false;
+    };
+    date.iter().all(u8::is_ascii_digit)
+        && matches!(&date[4..], [b'0', b'1'..=b'9'] | [b'1', b'0'..=b'2'])
+        && (suffix.is_empty()
+            || (suffix[0] == b'_'
+                && suffix[1..].iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')))
 }
 
 impl Drop for Phone {
@@ -888,7 +901,7 @@ impl Source for Phone {
     }
     fn album_scope_version(&self) -> Option<&'static str> {
         match self.album_scope {
-            AlbumScope::Apple => Some("apple-dcim-v1"),
+            AlbumScope::Apple => Some(super::archive::APPLE_EXPORT_SCOPE),
             AlbumScope::Shared => Some("android-albums-v2"),
             #[cfg(test)]
             AlbumScope::Unrestricted => None,
@@ -910,13 +923,16 @@ impl Source for Phone {
             return false;
         }
         let mut parts = relative.iter().peekable();
-        if parts.peek().is_some_and(|root| self.storage_roots.contains(Path::new(root))) {
+        let parent = if parts.peek().is_some_and(|root| self.storage_roots.contains(Path::new(root))) {
             parts.next();
-        }
+            DirectoryLevel::Storage
+        } else {
+            DirectoryLevel::Device
+        };
         let Some(root) = parts.next().and_then(|name| name.to_str()) else {
             return false;
         };
-        self.album_scope.is_album_root(root)
+        self.album_scope.is_album_root(parent, root)
             && parts.peek().is_some()
             && parts.all(|name| name.to_str().is_some_and(|name| !name.starts_with('.')))
     }

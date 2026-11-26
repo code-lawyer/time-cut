@@ -7,7 +7,7 @@
     <p class="report-path" :title="current.source" dir="auto">{{ current.source }}</p>
     <p v-if="current.local_errors" class="issue-list" role="status">{{ t('timecut.localRepairCount', { count: n(current.local_errors) }) }} {{ current.local_error }}</p>
     <p v-else-if="current.safe_at" class="safe-note" role="status" data-testid="originals-safe">
-      {{ t(liveRelease ? 'timecut.safeToUnplug' : 'timecut.receiptComplete') }} · {{ safeTime }}
+      {{ t(liveRelease ? 'timecut.safeToUnplug' : receiptText) }} · {{ safeTime }}
       <span v-if="receiveDuration"> · {{ t('timecut.receiveDuration', { duration: receiveDuration }) }}</span>
     </p>
     <p v-if="current.capture && !current.safe_at" class="scan-counts">{{ t('timecut.cableHint') }}</p>
@@ -69,6 +69,9 @@
         :max="current.total_bytes" :value="Math.min(current.transferred_bytes, current.total_bytes)" />
     </div>
     <ul v-if="current.issues?.length" class="issue-list"><li v-for="(issue, i) in current.issues" :key="i">{{ issue }}</li></ul>
+    <ul v-if="current.windows_export?.issues.length" class="issue-list">
+      <li v-for="(issue, i) in current.windows_export.issues" :key="i">{{ issue }}</li>
+    </ul>
     <details v-if="!busy && recent.length" class="history">
       <summary>{{ t('timecut.history') }}</summary>
       <ol><li v-for="(item, i) in recent" :key="i">
@@ -91,6 +94,10 @@ const retryTime = computed(() => props.retryAt && new Date(props.retryAt * 1000)
 const counters = ['added', 'skipped', 'failed'];
 const counterLabel = key => props.current.capture ? ({ added: 'received', skipped: 'alreadySaved' }[key] ?? key) : key;
 const safeTime = computed(() => new Date(props.current.safe_at).toLocaleString(locale.value));
+const receiptText = computed(() => ({
+  apple_camera: 'timecut.appleOriginalsComplete',
+  windows_export: 'timecut.windowsExportComplete',
+}[props.current.phone_channel] ?? 'timecut.receiptComplete'));
 const receiveDuration = computed(() => {
   const { capture_started_at: start, safe_at: end } = props.current;
   return Number.isSafeInteger(start) && Number.isSafeInteger(end) && end >= start
@@ -101,6 +108,7 @@ const phases = {
   '核对手机旧版本': 'comparingSource', '确认手机返回的原件': 'confirmingStream',
   '核对手机目录': 'checkPhoneFolders', '核对本地收件': 'checkReceipts',
   '接收手机原件': 'receiving', '原件已收齐，可以拔线': 'receiptComplete',
+  'Apple 相机原件已收齐': 'appleOriginalsComplete', 'Windows 导出已核对': 'windowsExportComplete',
   '正在本地整理': 'localFiling', '本地原件整理完成': 'localFiled',
   '已核对本机接收记录': 'localProofsChecked',
   '检查图库': 'checking', '正在读取': 'reading', '部分未完成': 'partial',
@@ -118,6 +126,7 @@ const phases = {
 const phase = value => phases[value] ? t('timecut.' + phases[value]) : value;
 function reportPhase(report) {
   if (report.local_errors || report.phase === '本地收件待修复') return t('timecut.localRepair');
+  if (report.windows_export?.busy) return t('timecut.windowsExportChecking', { count: n(report.windows_export.checked) });
   return report.verified ? t('timecut.repeatVerified') : phase(report.phase);
 }
 const transferSize = computed(() => {

@@ -109,6 +109,36 @@ impl std::fmt::Display for Phase {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PhoneChannel {
+    AppleCamera,
+    WindowsExport,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WindowsExport {
+    busy: bool,
+    complete: bool,
+    listed: Option<u64>,
+    checked: u64,
+    received: u64,
+    issues: Vec<String>,
+}
+
+impl WindowsExport {
+    fn from_report(report: &Report, busy: bool) -> Self {
+        Self {
+            busy,
+            complete: report.safe_at.is_some(),
+            listed: report.list_total,
+            checked: if report.list_total.is_some() { report.list_covered } else { report.added + report.skipped },
+            received: report.total_received,
+            issues: report.issues.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Report {
@@ -121,9 +151,14 @@ pub struct Report {
     total_bytes: Option<u64>,
     added: u64,
     skipped: u64,
+    previous_backup: bool,
     failed: u64,
     phone: bool,
     capture: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phone_channel: Option<PhoneChannel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    windows_export: Option<WindowsExport>,
     capture_started_at: Option<i64>,
     safe_at: Option<i64>,
     received_bytes: u64,
@@ -649,6 +684,8 @@ enum ImportSource<'a> {
     #[cfg(windows)]
     Phone {
         label: &'a str,
+        channel: Option<PhoneChannel>,
+        camera: Option<&'a Report>,
         open: Box<dyn FnOnce() -> Result<Box<dyn Source>> + 'a>,
     },
 }
@@ -660,10 +697,10 @@ fn job(
     source: ImportSource<'_>,
     check_active: impl FnMut() -> Result<()>,
 ) -> Result<Report> {
-    let (label, phone) = match &source {
-        ImportSource::Folder(path) => ((*path).to_string_lossy(), false),
+    let (label, phone, channel, camera): (_, _, Option<PhoneChannel>, Option<&Report>) = match &source {
+        ImportSource::Folder(path) => ((*path).to_string_lossy(), false, None, None),
         #[cfg(windows)]
-        ImportSource::Phone { label, .. } => (std::borrow::Cow::Borrowed(*label), true),
+        ImportSource::Phone { label, channel, camera, .. } => (std::borrow::Cow::Borrowed(*label), true, *channel, *camera),
     };
     // A crash may occur after publishing an original and before requesting an index. The
     // durable marker covers this entire window and disappears in the completion transaction.
@@ -683,13 +720,25 @@ fn job(
             params![dest.library, dest.album],
         )?;
     }
+    let shown_report = |report: &Report, busy: bool| {
+        if let Some(camera) = camera {
+            let mut combined = camera.clone();
+            combined.local_pending = combined.local_pending.max(report.local_pending);
+            combined.windows_export = Some(WindowsExport::from_report(report, busy));
+            combined
+        } else {
+            let mut report = report.clone();
+            report.phone_channel = channel;
+            report
+        }
+    };
     let mut index_at = 1;
     let progress = |p: &Report| {
         {
             let mut view = view.lock().unwrap();
             view.busy = true;
             view.next_retry_at = None;
-            view.report = p.clone();
+            view.report = shown_report(p, true);
         }
         if !phone && p.added >= index_at {
             // Show the first original promptly. Double later thresholds so a
@@ -723,6 +772,14 @@ fn job(
             check_active,
         ),
     };
+    report.phone_channel = channel;
+    if report.safe_at.is_some() {
+        match channel {
+            Some(PhoneChannel::AppleCamera) => report.phase = "Apple 相机原件已收齐".into(),
+            Some(PhoneChannel::WindowsExport) => report.phase = "Windows 导出已核对".into(),
+            None => (),
+        }
+    }
     let tx = db.unchecked_transaction()?;
     if phone {
         verification::observe_requested_repeat(&tx, dest, &mut report)?;
@@ -734,20 +791,30 @@ fn job(
         "DELETE FROM importing WHERE library=? AND album=?",
         params![dest.library, dest.album],
     )?;
-    record_history(&tx, &report)?;
+    let shown = shown_report(&report, false);
+    if let Some(camera) = camera {
+        let encoded = serde_json::to_string(&shown)?;
+        tx.execute("UPDATE history SET data=? WHERE json_extract(data,'$.safe_at')=? AND json_extract(data,'$.device_key')=?",
+            params![encoded,camera.safe_at,camera.device_key])?;
+    } else {
+        record_history(&tx, &shown)?;
+    }
     tx.commit()?;
     {
         let mut live = view.lock().unwrap();
         live.busy = false;
-        live.report = report.clone();
+        live.report = shown.clone();
     }
     if !phone && report.added > 0 {
         let _ = app.emit("timecut-index", ());
     }
-    if report.safe_at.is_some() {
-        let _ = app.emit("timecut-originals-safe", &report);
+    if report.safe_at.is_some() && (channel.is_none() || camera.is_some()) {
+        let _ = app.emit("timecut-originals-safe", &shown);
         #[cfg(windows)]
-        notice::originals_safe(app);
+        notice::originals_safe(app, false);
+    } else if report.safe_at.is_some() && channel == Some(PhoneChannel::AppleCamera) {
+        #[cfg(windows)]
+        notice::originals_safe(app, true);
     }
     view.lock().unwrap().recent = recent(&db)?;
     Ok(report)
@@ -831,15 +898,13 @@ fn worker(app: &AppHandle, view: &Arc<Mutex<View>>, rx: &mpsc::Receiver<Wake>) -
     }
     let mut completed = HashMap::<String, Option<(Instant, Duration)>>::new();
     #[cfg(windows)]
-    let mut native_checks = HashMap::<String,Instant>::new();
-    #[cfg(windows)]
-    let mut next_unlisted_probe = Instant::now();
+    let mut next_camera_probe = Instant::now();
     #[cfg(windows)]
     let mut camera_delay = Duration::from_secs(30);
     #[cfg(windows)]
     let mut camera_error = String::new();
     #[cfg(windows)]
-    let mut finished_camera = None;
+    let mut finished_camera: Option<afc::desktop::FinishedCamera> = None;
     let mut known_generation = None;
     let mut unavailable = catalog::Unavailable::new();
     let mut retry_catalogs = Instant::now();
@@ -860,7 +925,7 @@ fn worker(app: &AppHandle, view: &Arc<Mutex<View>>, rx: &mpsc::Receiver<Wake>) -
             checked_lists.clear();
             #[cfg(windows)]
             {
-                next_unlisted_probe = Instant::now();
+                next_camera_probe = Instant::now();
                 camera_delay = Duration::from_secs(30);
                 camera_error.clear();
                 view.lock().unwrap().apple_retry_at = None;
@@ -897,120 +962,120 @@ fn worker(app: &AppHandle, view: &Arc<Mutex<View>>, rx: &mpsc::Receiver<Wake>) -
             .map_err(|e| e.to_string())
             .and_then(|_| wpd::devices().map_err(|e| e.to_string()));
         #[cfg(windows)]
-        let windows_unlisted = detected.as_ref().map_or(true, |devices| !devices.iter().any(wpd::Device::is_apple));
-        #[cfg(windows)]
-        match detected {
-            Err(error) => {
-                view.lock().unwrap().device_error = error;
+        {
+            let devices = detected.as_deref().unwrap_or(&[]);
+            let mut apple = devices.iter().filter(|device| device.is_apple());
+            let first_apple = apple.next();
+            let windows_camera = first_apple.filter(|_| apple.next().is_none());
+            if removed.swap(false, Ordering::AcqRel) {
+                finished_camera = None;
+                next_camera_probe = Instant::now();
+                completed.clear();
             }
-            Ok(devices) => {
-                {
+            completed.retain(|id, _| devices.iter().any(|device| &device.id == id));
+            {
+                let mut live = view.lock().unwrap();
+                live.devices = devices.iter().map(|device| device.name.clone()).collect();
+                if first_apple.is_none() && let Some(camera) = &finished_camera {
+                    live.devices.push(camera.report.source.clone());
+                }
+                if !live.devices.contains(&live.report.source) {
+                    live.next_retry_at = None;
+                }
+                live.device_error = unavailable.values().next()
+                    .map(|message| format!("暂时无法读取相册索引，将自动重试。{message}"))
+                    .or_else(|| detected.as_ref().err().cloned())
+                    .unwrap_or_else(|| camera_error.clone());
+            }
+            if let Some(dest) = target(&db)?.filter(|t| t.auto && !unavailable.contains_key(&(t.library.clone(), t.album))) {
+                if Instant::now() >= next_camera_probe {
+                    let before = finished_camera.as_ref().and_then(|camera| camera.report.safe_at);
+                    let label = windows_camera.map_or(afc::desktop::CAMERA_LABEL, |device| &device.name);
+                    camera_error.clear();
+                    let interrupted = afc::desktop::receive(app, view, &dest, label, &mut finished_camera)
+                        .unwrap_or_else(|error| {
+                            camera_error = format!("Apple 相机原件暂时无法读取。{error}");
+                            true
+                        });
+                    let after = finished_camera.as_ref().and_then(|camera| camera.report.safe_at);
+                    if before != after {
+                        completed.retain(|id, _| !devices.iter().any(|device| device.id == *id && device.is_apple()));
+                        // Newly verified camera originals can be filed even if
+                        // opening the separate Windows export later stalls.
+                        local_work::process(app, view, &db, &unavailable, &mut checked_lists)?;
+                    }
+                    let delay = if interrupted {
+                        let delay = camera_delay;
+                        camera_delay = (camera_delay * 2).min(Duration::from_secs(300));
+                        delay
+                    } else {
+                        camera_delay = Duration::from_secs(20);
+                        if first_apple.is_some() || after.is_some() { Duration::from_secs(3) } else { Duration::from_secs(15) }
+                    };
+                    next_camera_probe = Instant::now() + delay;
                     let mut live = view.lock().unwrap();
-                    if !windows_unlisted {
-                        camera_error.clear();
-                        live.apple_retry_at = None;
-                    }
-                    live.device_error = unavailable
-                        .values()
-                        .next()
-                        .map(|message| format!("暂时无法读取相册索引，将自动重试。{message}"))
-                        .unwrap_or_else(|| camera_error.clone());
-                    live.devices = devices.iter().map(|d| d.name.clone()).collect();
-                    if windows_unlisted && finished_camera.as_ref().is_some_and(|camera: &afc::desktop::FinishedCamera| camera.belongs_to(live.target.as_ref())) {
-                        live.devices.push(afc::desktop::CAMERA_LABEL.into());
-                    }
-                    if !live.devices.contains(&live.report.source) {
-                        live.next_retry_at = None;
+                    live.apple_retry_at = interrupted.then(|| chrono::Utc::now().timestamp() + delay.as_secs() as i64);
+                    if !camera_error.is_empty() { live.device_error = camera_error.clone(); }
+                    if first_apple.is_none() && after.is_none() {
+                        live.devices.retain(|name| name != afc::desktop::CAMERA_LABEL || interrupted);
                     }
                 }
-                completed.retain(|id, _| devices.iter().any(|d| &d.id == id));
-                native_checks.retain(|id, _| devices.iter().any(|d| &d.id == id));
-                if let Some(dest) = target(&db)?
-                    .filter(|t| t.auto && !unavailable.contains_key(&(t.library.clone(), t.album)))
-                {
-                    for d in devices {
-                        if view.lock().unwrap().target.as_ref() != Some(&dest) {
-                            break;
-                        }
-                        if completed
-                            .get(&d.id)
-                            .is_some_and(|retry| retry.is_none_or(|(at, _)| at > Instant::now()))
-                        {
-                            continue;
-                        }
-                        let report = job(
-                            app,
-                            view,
-                            &dest,
-                            ImportSource::Phone {
-                                label: &d.name,
-                                open: Box::new(|| Ok(Box::new(wpd::Phone::open(&d)?))),
-                            },
-                            || {
-                                {
-                                    let live = view.lock().unwrap();
-                                    match live.target.as_ref() {
-                                        Some(current) if current == &dest => (),
-                                        Some(current) if current.auto => {
-                                            return Err(TransferStop::DestinationChanged.into());
-                                        }
-                                        _ => return Err(TransferStop::AutoDisabled.into()),
-                                    }
+                for device in devices {
+                    if view.lock().unwrap().target.as_ref() != Some(&dest) { break; }
+                    if completed.get(&device.id)
+                        .is_some_and(|retry| retry.is_none_or(|(at, _)| at > Instant::now())) {
+                        continue;
+                    }
+                    let channel = device.is_apple().then_some(PhoneChannel::WindowsExport);
+                    let candidate = finished_camera.as_mut().filter(|_| channel.is_some());
+                    let (camera, opened) = match candidate {
+                        Some(candidate) => {
+                            let opened = wpd::Phone::open(device);
+                            // Link the transport reports only with a matching hardware
+                            // identity. An unopened export can only be shown as unavailable.
+                            let paired = match &opened {
+                                Ok(phone) => candidate.matches_export(phone.identity()),
+                                Err(_) => windows_camera.is_some(),
+                            };
+                            if paired {
+                                let live = view.lock().unwrap();
+                                if live.report.safe_at == candidate.report.safe_at
+                                    && live.report.device_key == candidate.report.device_key {
+                                    candidate.report = live.report.clone();
                                 }
-                                if removed.swap(false, Ordering::AcqRel)
-                                    && wpd::devices().is_ok_and(|list| {
-                                        list.iter().all(|device| device.id != d.id)
-                                    })
-                                {
-                                    return Err(TransferStop::Disconnected.into());
-                                }
-                                Ok(())
-                            },
-                        )?;
-                        let find_camera = report.phase == Phase::AwaitAppleDirectory
-                            || report.device_key.is_none();
-                        if (find_camera || afc::supplement::stalled(&report))
-                            && d.is_apple()
-                            && native_checks.get(&d.id).is_none_or(|last| last.elapsed() >= Duration::from_secs(120)) {
-                            native_checks.insert(d.id.clone(), Instant::now());
-                            let windows_report = if find_camera { None } else { Some(&report) };
-                            if let Err(error) = afc::desktop::receive(app,view,&db,&dest,windows_report,&mut finished_camera) {
-                                view.lock().unwrap().device_error = format!("Apple 相机原件暂时无法读取。{error}");
+                                (Some(&candidate.report), Some(opened))
+                            } else {
+                                (None, Some(opened))
                             }
                         }
-                        let previous = completed.get(&d.id).copied().flatten().map(|(_, d)| d);
-                        let retry = next_phone_retry(&report, previous)
-                            .map(|delay| (Instant::now() + delay, delay));
-                        view.lock().unwrap().next_retry_at = retry.map(|(_, delay)| {
-                            chrono::Utc::now().timestamp() + delay.as_secs() as i64
-                        });
-                        completed.insert(d.id, retry);
-                    }
+                        None => (None, None),
+                    };
+                    let report = job(app, view, &dest, ImportSource::Phone {
+                        label: &device.name,
+                        channel,
+                        camera,
+                        open: Box::new(move || Ok(Box::new(opened.unwrap_or_else(|| wpd::Phone::open(device))?))),
+                    }, || {
+                        match view.lock().unwrap().target.as_ref() {
+                            Some(current) if current == &dest => (),
+                            Some(current) if current.auto => return Err(TransferStop::DestinationChanged.into()),
+                            _ => return Err(TransferStop::AutoDisabled.into()),
+                        }
+                        if removed.load(Ordering::Acquire) && wpd::devices().is_ok_and(|list| {
+                            list.iter().all(|connected| connected.id != device.id)
+                        }) {
+                            return Err(TransferStop::Disconnected.into());
+                        }
+                        Ok(())
+                    })?;
+                    let previous = completed.get(&device.id).copied().flatten().map(|(_, delay)| delay);
+                    let retry = next_phone_retry(&report, previous).map(|delay| (Instant::now() + delay, delay));
+                    view.lock().unwrap().next_retry_at = retry.map(|(_, delay)| {
+                        chrono::Utc::now().timestamp() + delay.as_secs() as i64
+                    });
+                    completed.insert(device.id.clone(), retry);
                 }
             }
-        }
-        // A paired camera may be the only source Apple publishes on Windows.
-        #[cfg(windows)]
-        if windows_unlisted && Instant::now() >= next_unlisted_probe {
-            let mut delay = Duration::from_secs(30);
-            if let Some(dest) = target(&db)?.filter(|t| t.auto && !unavailable.contains_key(&(t.library.clone(), t.album))) {
-                view.lock().unwrap().apple_retry_at = None;
-                camera_error.clear();
-                let interrupted = afc::desktop::receive(app,view,&db,&dest,None,&mut finished_camera).unwrap_or_else(|error| {
-                    camera_error = format!("Apple 相机原件暂时无法读取。{error}");
-                    true
-                });
-                let mut live = view.lock().unwrap();
-                if live.target.as_ref() == Some(&dest) {
-                    live.device_error = camera_error.clone();
-                    if interrupted {
-                        delay = camera_delay;
-                        camera_delay = (camera_delay*2).min(Duration::from_secs(300));
-                        live.apple_retry_at = Some(chrono::Utc::now().timestamp() + delay.as_secs() as i64);
-                    } else { camera_delay = Duration::from_secs(30); }
-                }
-            }
-            next_unlisted_probe = Instant::now() + delay;
         }
         match rx.recv_timeout(Duration::from_secs(3)) {
             Ok(wake) => {

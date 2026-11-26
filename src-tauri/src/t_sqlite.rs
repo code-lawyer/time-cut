@@ -1577,6 +1577,17 @@ impl FolderScanState {
 
 pub(crate) type FileGps = (Option<f64>, Option<f64>, Option<f64>);
 
+/// Bytes were replaced when the size changes, or when both filesystem identities
+/// are known and differ. A timestamp-only change keeps faces, names and thumbnails.
+pub(crate) fn file_bytes_replaced(
+    old_size: i64,
+    new_size: i64,
+    old_inode: Option<i64>,
+    new_inode: Option<i64>,
+) -> bool {
+    old_size != new_size || matches!((old_inode, new_inode), (Some(old), Some(new)) if old != new)
+}
+
 /// Define the album file struct
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AFile {
@@ -3267,12 +3278,16 @@ impl AFile {
         let mut conn = open_conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
-        let changed_content: bool = tx.query_row(
-            "SELECT size IS NOT ?2 OR modified_at IS NOT ?3
-              OR (inode IS NOT NULL AND ?4 IS NOT NULL AND inode IS NOT ?4)
-             FROM afiles WHERE id=?1",
-            params![file_id, file.size, file.modified_at, file.inode], |row| row.get(0),
-        ).optional().map_err(|e| e.to_string())?.unwrap_or(false);
+        let previous: Option<(i64, Option<i64>)> = tx.query_row(
+            "SELECT size, inode FROM afiles WHERE id=?1",
+            [file_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional().map_err(|e| e.to_string())?;
+        // A touch or sync can change the timestamp without replacing the bytes.
+        // Size and the filesystem identity still invalidate faces and thumbnails.
+        let changed_content = previous.is_some_and(|(size, inode)| {
+            file_bytes_replaced(size, file.size, inode, file.inode)
+        });
         if changed_content {
             crate::t_face::refresh::remember_assignments(&tx, file_id).map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM face_retries WHERE file_id=?1", [file_id]).map_err(|e| e.to_string())?;
@@ -4675,8 +4690,12 @@ impl AFile {
             }
         }
 
-        let content_changed = old_file_info.size != new_file_info.size
-            || old_file_info.modified_at != new_file_info.modified_at;
+        let content_changed = file_bytes_replaced(
+            old_file_info.size,
+            new_file_info.size,
+            old_file_info.inode,
+            new_file_info.inode,
+        );
         if content_changed || old_file_info.width != new_file_info.width || old_file_info.height != new_file_info.height
             || old_file_info.e_orientation != new_file_info.e_orientation {
             AThumb::mark_stale(file_id)?;
@@ -11485,6 +11504,20 @@ mod album_filter_tests {
         for path in ["", ".", "..", "../sibling", "parent/child", "parent\\child", "/absolute"] {
             assert!(Album::edit(1,"name","",7,0,&[path.into()]).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod file_identity_tests {
+    use super::file_bytes_replaced;
+
+    #[test]
+    fn a_timestamp_change_keeps_derived_data_until_size_or_file_identity_changes() {
+        assert!(!file_bytes_replaced(100, 100, Some(7), Some(7)));
+        assert!(!file_bytes_replaced(100, 100, None, Some(7)));
+        assert!(!file_bytes_replaced(100, 100, Some(7), None));
+        assert!(file_bytes_replaced(100, 101, Some(7), Some(7)));
+        assert!(file_bytes_replaced(100, 100, Some(7), Some(8)));
     }
 }
 

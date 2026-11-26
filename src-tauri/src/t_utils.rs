@@ -798,6 +798,11 @@ pub fn restore_album_scopes(app_handle: &tauri::AppHandle) -> Result<(), String>
     for album in albums {
         authorize_directory_scope(app_handle, &album.path)?;
     }
+    if let Some(cache) = crate::t_config::load_app_config()?.thumbnail_cache_dir {
+        if Path::new(&cache).is_dir() {
+            authorize_directory_scope(app_handle, &cache)?;
+        }
+    }
 
     Ok(())
 }
